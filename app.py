@@ -52,6 +52,11 @@ def parse_be(file_bytes: bytes, sheet: str) -> list[dict]:
     return be_logic.parse_be_sheet(aoa)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _supabase_status() -> tuple[bool, str]:
+    return supabase_io.check_connection()
+
+
 # --------------------------------------------------------------------------- #
 # Session state
 # --------------------------------------------------------------------------- #
@@ -81,7 +86,8 @@ with hdr_l:
     st.title("JSW One — Order Intelligence")
 with hdr_r:
     if supabase_io.is_configured():
-        st.caption("Supabase: connected")
+        ok, msg = _supabase_status()
+        (st.success if ok else st.error)(msg)
     else:
         st.caption("Supabase: not configured (no persistence)")
 
