@@ -107,9 +107,12 @@ def get_data():
             with st.spinner("Parsing order file…"):
                 st.session_state.order_data = parse_order_workbook(file_bytes)
             st.session_state.order_hash = h
+            st.session_state.order_size = len(file_bytes)
             if supabase_io.is_configured():
                 with st.spinner("Saving to Supabase…"):
-                    supabase_io.save_order_file(file_bytes)
+                    ok = supabase_io.save_order_file(file_bytes)
+                st.session_state.order_saved = ok
+                st.session_state.order_save_err = None if ok else supabase_io.last_error()
         return st.session_state.order_data
 
     # No file in the uploader: load the saved copy from storage once per session.
@@ -140,6 +143,20 @@ with hdr_r:
 st.file_uploader("Load order Excel (.xlsx)", type=["xlsx", "xls"], key="order_upload")
 
 df, inv_index = get_data()
+
+# Persistence status — tells you whether colleagues will see this file
+if supabase_io.is_configured() and st.session_state.get("order_saved") is not None:
+    if st.session_state.order_saved:
+        st.caption("✅ Saved to Supabase — colleagues opening the app will load this "
+                   "file automatically.")
+    else:
+        size_mb = st.session_state.get("order_size", 0) / 1_000_000
+        st.warning(
+            f"⚠️ Loaded for you, but **could not save to Supabase** (your colleagues "
+            f"will still see the upload prompt). File is {size_mb:.0f} MB. "
+            f"Supabase's free tier rejects uploads over ~50 MB — raise the bucket's "
+            f"file-size limit, upgrade the plan, or share a smaller export.\n\n"
+            f"Error: `{st.session_state.get('order_save_err')}`")
 
 if df is None or not len(df):
     st.info("Upload your Excel file. The dashboard reads the **Order** sheet "
