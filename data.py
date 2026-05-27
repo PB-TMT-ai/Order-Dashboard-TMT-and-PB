@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 # --- Source column names in the Order sheet (mirror of K{} in the HTML) ---
@@ -164,23 +165,73 @@ class InvoiceEntry:
     first_date: datetime | None = None
 
 
-def build_invoice_index(inv_rows: list[dict]) -> dict[str, InvoiceEntry]:
+# --- Vectorised column helpers (used by enrich / build_invoice_index) ---
+
+def _col(df: pd.DataFrame, key: str) -> pd.Series:
+    """Source column by logical key, or an empty Series if absent."""
+    name = K[key]
+    if name in df.columns:
+        return df[name]
+    return pd.Series([None] * len(df), index=df.index, dtype="object")
+
+
+def _num_series(s: pd.Series) -> pd.Series:
+    """Vectorised num(): strip separators/symbols, coerce to float, NaN -> 0."""
+    if pd.api.types.is_numeric_dtype(s):
+        return pd.to_numeric(s, errors="coerce").fillna(0.0).astype(float)
+    cleaned = s.astype(str).str.strip().str.replace(
+        r"[,\s ₹$€£]", "", regex=True)
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0.0).astype(float)
+
+
+def _date_series(s: pd.Series) -> pd.Series:
+    """Vectorised parse_date(): returns a datetime64 Series (NaT for missing)."""
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s
+    txt = s.astype(str).str.strip()
+    txt = txt.where(~txt.isin(["", "nan", "NaT", "0", "None"]), other=None)
+    out = pd.to_datetime(txt, errors="coerce")
+    missing = out.isna() & txt.notna()
+    if missing.any():  # fall back to day-first (d/m/y) parsing
+        out = out.copy()
+        out[missing] = pd.to_datetime(txt[missing], errors="coerce", dayfirst=True)
+    return out
+
+
+def _cl_series(s: pd.Series) -> pd.Series:
+    """Vectorised cl(): clean string, sentinel values -> ''."""
+    txt = s.astype(str).str.strip()
+    return txt.where(~txt.isin(["nan", "NaT", "None"]), other="")
+
+
+def _to_obj_dates(dt: pd.Series) -> list:
+    return [None if pd.isna(x) else x for x in dt]
+
+
+def build_invoice_index(inv_df: pd.DataFrame) -> dict[str, InvoiceEntry]:
     """Index invoice rows by Order ID, accumulating per-invoice dates and qty."""
     index: dict[str, InvoiceEntry] = {}
-    for inv in inv_rows:
-        oid = str(inv.get("Order ID", "") or "").strip()
+    if inv_df is None or not len(inv_df):
+        return index
+    oids = inv_df["Order ID"].astype(str).str.strip() if "Order ID" in inv_df else \
+        pd.Series([""] * len(inv_df))
+    dates = _to_obj_dates(_date_series(inv_df["Invoice date"])) if "Invoice date" in inv_df \
+        else [None] * len(inv_df)
+    qtys = _num_series(inv_df["Invoiced qty"]).tolist() if "Invoiced qty" in inv_df \
+        else [0.0] * len(inv_df)
+    nums = inv_df["Invoice number"].astype(str).str.strip().tolist() \
+        if "Invoice number" in inv_df else [""] * len(inv_df)
+
+    for oid, date, qty, num_id in zip(oids.tolist(), dates, qtys, nums):
         if not oid:
             continue
-        date = parse_date(inv.get("Invoice date"))
-        qty = num(inv.get("Invoiced qty"))
-        num_id = str(inv.get("Invoice number", "") or "").strip()
         entry = index.get(oid)
         if entry is None:
             entry = InvoiceEntry()
             index[oid] = entry
         entry.invs.append({"date": date, "qty": qty, "num": num_id})
         entry.total_qty += qty
-        if date:
+        if date is not None:
             if entry.last_date is None or date > entry.last_date:
                 entry.last_date = date
             if entry.first_date is None or date < entry.first_date:
@@ -188,62 +239,102 @@ def build_invoice_index(inv_rows: list[dict]) -> dict[str, InvoiceEntry]:
     return index
 
 
-def enrich(order_rows: list[dict], inv_index: dict[str, InvoiceEntry],
+def enrich(order_df: pd.DataFrame, inv_index: dict[str, InvoiceEntry],
            today: datetime | None = None) -> pd.DataFrame:
-    """Enrich raw order rows into a DataFrame mirroring the HTML's `_` fields."""
+    """Enrich raw order rows into a DataFrame mirroring the HTML's `_` fields.
+
+    Fully vectorised — preserves the per-row business rules exactly.
+    """
+    if not isinstance(order_df, pd.DataFrame):
+        order_df = pd.DataFrame(order_df)
     if today is None:
         today = datetime.now()
     today = today.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_ts = pd.Timestamp(today)
+    n = len(order_df)
+    idx = order_df.index
 
-    recs: list[dict] = []
-    for r in order_rows:
-        d = parse_date(r.get(K["date"]))
-        q = num(r.get(K["qty"]))
-        rq = num(r.get(K["rqty"]))
-        iq = num(r.get(K["iqty"]))
-        cq = num(r.get(K["cqty"]))
-        sta = cl(r.get(K["status"]))
-        ot = cl(r.get(K["ot"]))
-        dis = cl(r.get(K["dis"]))
-        oid = cl(r.get(K["oid"]))
-        dn = cl(r.get(K["dname"])) or "Direct"
+    dt = _date_series(_col(order_df, "date"))
+    q = _num_series(_col(order_df, "qty"))
+    rq = _num_series(_col(order_df, "rqty"))
+    iq = _num_series(_col(order_df, "iqty"))
+    cq = _num_series(_col(order_df, "cqty"))
+    sta = _cl_series(_col(order_df, "status"))
+    ot = _cl_series(_col(order_df, "ot"))
+    dis = _cl_series(_col(order_df, "dis"))
+    oid = _cl_series(_col(order_df, "oid"))
+    dn = _cl_series(_col(order_df, "dname")).replace("", "Direct")
 
-        raw_pend = 0.0 if sta == "Cancelled" else max(q - rq - cq, 0.0)
-        pend = raw_pend
-        sc_short = False
-        if raw_pend > 0:
-            if raw_pend < 5:
-                pend = 0.0
-                sc_short = True
-            elif d is not None:
-                days_old = (today - d).days
-                if days_old > 60:
-                    pend = 0.0
-                    sc_short = True
+    # P&T detection
+    cm_l = _col(order_df, "cm").astype(str).str.lower()
+    gr_l = _col(order_df, "gr").astype(str).str.lower().str.replace(" ", "", regex=False)
+    pt_mask = (cm_l.str.contains("nippon", na=False)
+               | gr_l.str.contains("yst", na=False))
+    pt = np.where(pt_mask, "P&T", "TMT")
 
-        e = inv_index.get(oid)
-        recs.append({
-            "_d": d,
-            "_q": q, "_rq": rq, "_iq": iq, "_cq": cq,
-            "_pt": "P&T" if is_pt(r) else "TMT",
-            "_w": week_key(d), "_m": d.strftime("%Y-%m") if d else "",
-            "_y": str(d.year) if d else "",
-            "_st": cl(r.get(K["sts"])), "_ct": cl(r.get(K["stc"])),
-            "_gr": cl(r.get(K["gr"])), "_dia": cl(r.get(K["dia"])),
-            "_fm": cl(r.get(K["frm"])), "_p2": cl(r.get(K["ptm"])),
-            "_dl": cl(r.get(K["dlm"])), "_cm": cl(r.get(K["cm"])),
-            "_ws": cl(r.get(K["ws"])), "_dis": dis,
-            "_dn": dn, "_dnN": norm_name(dn),
-            "_sf": cl(r.get(K["sfs"])), "_bs": bill_state(r),
-            "_sta": sta, "_ot": ot, "_oid": oid,
-            "_ch": order_channel(ot, dis),
-            "_pendOrig": raw_pend, "_pend": pend, "_scShort": sc_short,
-            "_pendInv": max(rq - iq, 0.0),
-            "_invDateLast": e.last_date if e else None,
-            "_invDateFirst": e.first_date if e else None,
-            "_orderTotInv": e.total_qty if e else 0.0,
-        })
-    return pd.DataFrame.from_records(recs)
+    # Date-derived keys
+    has_date = dt.notna()
+    y = pd.Series("", index=idx)
+    m = pd.Series("", index=idx)
+    w = pd.Series("", index=idx)
+    if has_date.any():
+        dd = dt[has_date]
+        y.loc[has_date] = dd.dt.year.astype(int).astype(str)
+        m.loc[has_date] = dd.dt.strftime("%Y-%m")
+        iso = dd.dt.isocalendar()
+        w.loc[has_date] = (iso["year"].astype(int).astype(str) + "-W"
+                           + iso["week"].astype(int).astype(str).str.zfill(2))
+
+    # Channel
+    ch = np.full(n, "rt", dtype=object)
+    ch[ot.values == "Self-stocking"] = "ss"
+    proj = ot.values == "Project"
+    ch[proj & (dis.values == "Yes")] = "pd"
+    ch[proj & (dis.values != "Yes")] = "pdir"
+
+    # Bill-to state from GST code
+    gst = _col(order_df, "bGST").astype(str).str.strip()
+    code = pd.to_numeric(gst.str[:2], errors="coerce")
+    bs = code.map(lambda c: SC_.get(int(c), "") if pd.notna(c) else "")
+
+    # Normalised distributor name
+    dn_norm = (dn.str.upper().str.replace(_NAME_PUNCT, " ", regex=True)
+               .str.replace(_NAME_TOKENS, "", regex=True).str.strip())
+
+    # Pending + short-close
+    raw_pend = np.where(sta.values == "Cancelled", 0.0,
+                        np.maximum(q.values - rq.values - cq.values, 0.0))
+    days_old = (today_ts - dt).dt.days
+    short_small = (raw_pend > 0) & (raw_pend < 5)
+    short_old = (raw_pend >= 5) & has_date.values & (days_old.values > 60)
+    sc_short = short_small | short_old
+    pend = np.where(sc_short, 0.0, raw_pend)
+    pend_inv = np.maximum(rq.values - iq.values, 0.0)
+
+    # Invoice context (per order id)
+    tot_inv = oid.map(lambda o: inv_index[o].total_qty if o in inv_index else 0.0)
+    last_d = oid.map(lambda o: inv_index[o].last_date if o in inv_index else None)
+    first_d = oid.map(lambda o: inv_index[o].first_date if o in inv_index else None)
+
+    return pd.DataFrame({
+        "_d": dt.to_numpy(), "_q": q.values, "_rq": rq.values, "_iq": iq.values,
+        "_cq": cq.values, "_pt": pt, "_w": w.values, "_m": m.values, "_y": y.values,
+        "_st": _cl_series(_col(order_df, "sts")).values,
+        "_ct": _cl_series(_col(order_df, "stc")).values,
+        "_gr": _cl_series(_col(order_df, "gr")).values,
+        "_dia": _cl_series(_col(order_df, "dia")).values,
+        "_fm": _cl_series(_col(order_df, "frm")).values,
+        "_p2": _cl_series(_col(order_df, "ptm")).values,
+        "_dl": _cl_series(_col(order_df, "dlm")).values,
+        "_cm": _cl_series(_col(order_df, "cm")).values,
+        "_ws": _cl_series(_col(order_df, "ws")).values,
+        "_dis": dis.values, "_dn": dn.values, "_dnN": dn_norm.values,
+        "_sf": _cl_series(_col(order_df, "sfs")).values, "_bs": bs.values,
+        "_sta": sta.values, "_ot": ot.values, "_oid": oid.values, "_ch": ch,
+        "_pendOrig": raw_pend, "_pend": pend, "_scShort": sc_short,
+        "_pendInv": pend_inv, "_invDateLast": _to_obj_dates(last_d),
+        "_invDateFirst": _to_obj_dates(first_d), "_orderTotInv": tot_inv.values,
+    })
 
 
 def invoiced_in_range(row: pd.Series | dict, from_date: datetime, to_date: datetime,
@@ -254,7 +345,7 @@ def invoiced_in_range(row: pd.Series | dict, from_date: datetime, to_date: datet
     iq = row["_iq"]
     if e is None or e.total_qty == 0:
         d = row["_d"]
-        if iq > 0 and d is not None and from_date <= d <= to_date:
+        if iq > 0 and pd.notna(d) and from_date <= d <= to_date:
             return iq
         return 0.0
     q = 0.0
@@ -269,6 +360,39 @@ def invoiced_in_range(row: pd.Series | dict, from_date: datetime, to_date: datet
 def invoiced_in_range_series(df: pd.DataFrame, from_date: datetime, to_date: datetime,
                              inv_index: dict[str, InvoiceEntry]) -> pd.Series:
     return df.apply(lambda r: invoiced_in_range(r, from_date, to_date, inv_index), axis=1)
+
+
+def invoiced_in_period(df: pd.DataFrame, from_date: datetime, to_date: datetime,
+                       inv_index: dict[str, InvoiceEntry]) -> pd.Series:
+    """Vectorised invoice-in-range attribution over a DataFrame.
+
+    Equivalent to applying invoiced_in_range() per row, but fast: one pass over
+    the invoice index, then vectorised allocation across order rows.
+    """
+    if not len(df):
+        return pd.Series([], dtype=float)
+    # Per-order allocation factor = (qty invoiced within range) / (order total invoiced)
+    factor: dict[str, float] = {}
+    for oid, e in inv_index.items():
+        if e.total_qty == 0:
+            continue
+        s = 0.0
+        for inv in e.invs:
+            d = inv["date"]
+            if d is not None and from_date <= d <= to_date:
+                s += inv["qty"]
+        if s:
+            factor[oid] = s / e.total_qty
+
+    oids = df["_oid"]
+    iq = df["_iq"].to_numpy(dtype=float)
+    has_entry = oids.map(lambda o: o in inv_index and inv_index[o].total_qty > 0).to_numpy()
+    fac = oids.map(lambda o: factor.get(o, 0.0)).to_numpy(dtype=float)
+
+    d = df["_d"]
+    in_range = (d.notna() & (d >= from_date) & (d <= to_date)).to_numpy()
+    fallback = np.where((~has_entry) & (iq > 0) & in_range, iq, 0.0)
+    return pd.Series(np.where(has_entry, fac * iq, fallback), index=df.index)
 
 
 def invoiced_daily_map(df: pd.DataFrame, from_date: datetime, to_date: datetime,

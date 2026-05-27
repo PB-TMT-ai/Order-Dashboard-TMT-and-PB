@@ -5,6 +5,7 @@ complete; some tabs are marked TODO for the iteration session (see README).
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import io
 from datetime import datetime
@@ -21,33 +22,43 @@ st.set_page_config(page_title="JSW One — Order Intelligence", layout="wide")
 
 
 # --------------------------------------------------------------------------- #
-# Data loading (cached on raw bytes)
+# Data loading
 # --------------------------------------------------------------------------- #
-@st.cache_data(show_spinner="Parsing Excel...")
+# 'calamine' (Rust) reads .xlsx far faster and with much less memory than
+# openpyxl — essential for large (tens of MB) exports.
+def _excel_file(file_bytes: bytes):
+    try:
+        return pd.ExcelFile(io.BytesIO(file_bytes), engine="calamine")
+    except Exception:
+        return pd.ExcelFile(io.BytesIO(file_bytes))
+
+
 def parse_order_workbook(file_bytes: bytes):
     """Read the Order + Invoice sheets and return (enriched_df, inv_index)."""
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))
+    xls = _excel_file(file_bytes)
     inv_index = {}
     inv_sheet = next((s for s in xls.sheet_names if s.lower() == "invoice"), None) \
         or next((s for s in xls.sheet_names if "invoice" in s.lower()), None)
     if inv_sheet:
-        inv_df = pd.read_excel(xls, sheet_name=inv_sheet)
-        inv_index = data.build_invoice_index(inv_df.to_dict("records"))
+        inv_index = data.build_invoice_index(pd.read_excel(xls, sheet_name=inv_sheet))
 
     order_sheet = next((s for s in xls.sheet_names if "order" in s.lower()), xls.sheet_names[0])
-    order_df = pd.read_excel(xls, sheet_name=order_sheet)
-    enriched = data.enrich(order_df.to_dict("records"), inv_index)
+    enriched = data.enrich(pd.read_excel(xls, sheet_name=order_sheet), inv_index)
     return enriched, inv_index
 
 
-@st.cache_data(show_spinner="Parsing BE sheet...")
+@st.cache_data(show_spinner="Reading BE sheet names...")
 def list_be_sheets(file_bytes: bytes) -> list[str]:
-    return pd.ExcelFile(io.BytesIO(file_bytes)).sheet_names
+    return _excel_file(file_bytes).sheet_names
 
 
 @st.cache_data(show_spinner=False)
 def parse_be(file_bytes: bytes, sheet: str) -> list[dict]:
-    raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet, header=None)
+    try:
+        raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet, header=None,
+                            engine="calamine")
+    except Exception:
+        raw = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet, header=None)
     aoa = raw.where(pd.notna(raw), "").values.tolist()
     return be_logic.parse_be_sheet(aoa)
 
@@ -83,17 +94,34 @@ def restore_be():
 
 
 def get_data():
-    """Return (df, inv_index) from an uploaded file or Supabase, else (None, None)."""
+    """Return (df, inv_index), parsed once per file and cached in session_state.
+
+    Parsing and the (potentially large) Supabase upload run only when the file
+    actually changes — not on every rerun.
+    """
     up = st.session_state.get("order_upload")
     if up is not None:
         file_bytes = up.getvalue()
-        if supabase_io.is_configured():
-            supabase_io.save_order_file(file_bytes)
-        return parse_order_workbook(file_bytes)
-    cached = supabase_io.load_order_file()
-    if cached:
-        return parse_order_workbook(cached)
-    return None, None
+        h = hashlib.md5(file_bytes).hexdigest()
+        if st.session_state.get("order_hash") != h:
+            with st.spinner("Parsing order file…"):
+                st.session_state.order_data = parse_order_workbook(file_bytes)
+            st.session_state.order_hash = h
+            if supabase_io.is_configured():
+                with st.spinner("Saving to Supabase…"):
+                    supabase_io.save_order_file(file_bytes)
+        return st.session_state.order_data
+
+    # No file in the uploader: load the saved copy from storage once per session.
+    if "order_data" not in st.session_state:
+        cached = supabase_io.load_order_file() if supabase_io.is_configured() else None
+        if cached:
+            with st.spinner("Loading saved order file…"):
+                st.session_state.order_data = parse_order_workbook(cached)
+            st.session_state.order_hash = hashlib.md5(cached).hexdigest()
+        else:
+            st.session_state.order_data = (None, None)
+    return st.session_state.order_data
 
 
 # --------------------------------------------------------------------------- #
@@ -241,9 +269,7 @@ nd = data.apply_non_date_filters(df, f)
 ch_inp = {c: 0.0 for c in ("rt", "ss", "pdir", "pd")}
 if len(nd):
     if period:
-        iip = nd.apply(
-            lambda r: data.invoiced_in_range(r, period["from"], period["to"], inv_index),
-            axis=1)
+        iip = data.invoiced_in_period(nd, period["from"], period["to"], inv_index)
     else:
         iip = nd["_iq"]
     inv_in_period = float(iip.sum())

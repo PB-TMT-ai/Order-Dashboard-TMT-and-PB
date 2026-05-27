@@ -204,7 +204,7 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
             if pipe > 0:
                 if pipe < 5:
                     pipe_eff = 0.0
-                elif r["_d"] is not None:
+                elif pd.notna(r["_d"]):
                     days_old = (today - r["_d"]).days
                     pipe_eff = 0.0 if days_old > 60 else pipe
                 else:
