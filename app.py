@@ -16,7 +16,7 @@ import streamlit as st
 import be_logic
 import data
 import plots
-import supabase_io
+import storage_io as storage
 
 st.set_page_config(page_title="JSW One — Order Intelligence", layout="wide")
 
@@ -64,8 +64,8 @@ def parse_be(file_bytes: bytes, sheet: str) -> list[dict]:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _supabase_status() -> tuple[bool, str]:
-    return supabase_io.check_connection()
+def _storage_status() -> tuple[bool, str]:
+    return storage.check_connection()
 
 
 # --------------------------------------------------------------------------- #
@@ -78,9 +78,9 @@ if "be_restore_tried" not in st.session_state:
 
 
 def restore_be():
-    """Reconstruct the last-saved BE version from Supabase Storage, or None."""
-    meta = supabase_io.load_be_meta()
-    be_bytes = supabase_io.load_be_file()
+    """Reconstruct the last-saved BE version from cloud storage, or None."""
+    meta = storage.load_be_meta()
+    be_bytes = storage.load_be_file()
     if not meta or not be_bytes or not meta.get("sheet") or not meta.get("month"):
         return None
     rows = parse_be(be_bytes, meta["sheet"])
@@ -96,7 +96,7 @@ def restore_be():
 def get_data():
     """Return (df, inv_index), parsed once per file and cached in session_state.
 
-    Parsing and the (potentially large) Supabase upload run only when the file
+    Parsing and the (potentially large) cloud upload run only when the file
     actually changes — not on every rerun.
     """
     up = st.session_state.get("order_upload")
@@ -108,16 +108,16 @@ def get_data():
                 st.session_state.order_data = parse_order_workbook(file_bytes)
             st.session_state.order_hash = h
             st.session_state.order_size = len(file_bytes)
-            if supabase_io.is_configured():
-                with st.spinner("Saving to Supabase…"):
-                    ok = supabase_io.save_order_file(file_bytes)
+            if storage.is_configured():
+                with st.spinner("Saving to cloud storage…"):
+                    ok = storage.save_order_file(file_bytes)
                 st.session_state.order_saved = ok
-                st.session_state.order_save_err = None if ok else supabase_io.last_error()
+                st.session_state.order_save_err = None if ok else storage.last_error()
         return st.session_state.order_data
 
     # No file in the uploader: load the saved copy from storage once per session.
     if "order_data" not in st.session_state:
-        cached = supabase_io.load_order_file() if supabase_io.is_configured() else None
+        cached = storage.load_order_file() if storage.is_configured() else None
         if cached:
             with st.spinner("Loading saved order file…"):
                 st.session_state.order_data = parse_order_workbook(cached)
@@ -134,28 +134,26 @@ hdr_l, hdr_r = st.columns([3, 1])
 with hdr_l:
     st.title("JSW One — Order Intelligence")
 with hdr_r:
-    if supabase_io.is_configured():
-        ok, msg = _supabase_status()
+    if storage.is_configured():
+        ok, msg = _storage_status()
         (st.success if ok else st.error)(msg)
     else:
-        st.caption("Supabase: not configured (no persistence)")
+        st.caption("Cloud storage: not configured (no persistence)")
 
 st.file_uploader("Load order Excel (.xlsx)", type=["xlsx", "xls"], key="order_upload")
 
 df, inv_index = get_data()
 
 # Persistence status — tells you whether colleagues will see this file
-if supabase_io.is_configured() and st.session_state.get("order_saved") is not None:
+if storage.is_configured() and st.session_state.get("order_saved") is not None:
     if st.session_state.order_saved:
-        st.caption("✅ Saved to Supabase — colleagues opening the app will load this "
-                   "file automatically.")
+        st.caption("✅ Saved to cloud storage — colleagues opening the app will load "
+                   "this file automatically.")
     else:
         size_mb = st.session_state.get("order_size", 0) / 1_000_000
         st.warning(
-            f"⚠️ Loaded for you, but **could not save to Supabase** (your colleagues "
-            f"will still see the upload prompt). File is {size_mb:.0f} MB. "
-            f"Supabase's free tier rejects uploads over ~50 MB — raise the bucket's "
-            f"file-size limit, upgrade the plan, or share a smaller export.\n\n"
+            f"⚠️ Loaded for you, but **could not save to cloud storage** (your "
+            f"colleagues will still see the upload prompt). File is {size_mb:.0f} MB.\n\n"
             f"Error: `{st.session_state.get('order_save_err')}`")
 
 if df is None or not len(df):
@@ -165,7 +163,7 @@ if df is None or not len(df):
 
 # Restore the last-saved BE once per session (after order data is available)
 if (st.session_state.be_version is None and not st.session_state.be_restore_tried
-        and supabase_io.is_configured()):
+        and storage.is_configured()):
     st.session_state.be_restore_tried = True
     st.session_state.be_version = restore_be()
 
@@ -416,9 +414,9 @@ with tab_be:
                         upload_date=datetime.now().isoformat(), month_label=label,
                         month_y=y, month_m=m0, week=week.strip(), sheet=sheet,
                         rows=rows, total_be=total)
-                    if supabase_io.is_configured():
-                        supabase_io.save_be_file(be_bytes)
-                        supabase_io.save_be_meta({
+                    if storage.is_configured():
+                        storage.save_be_file(be_bytes)
+                        storage.save_be_meta({
                             "sheet": sheet, "month": month_val, "week": week.strip(),
                             "uploaded": datetime.now().isoformat()})
                     st.success(f"BE loaded: {label} · {len({r['distNorm'] for r in rows})} "
