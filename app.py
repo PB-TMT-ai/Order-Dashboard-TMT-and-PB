@@ -62,6 +62,24 @@ def _supabase_status() -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 if "be_version" not in st.session_state:
     st.session_state.be_version = None
+if "be_restore_tried" not in st.session_state:
+    st.session_state.be_restore_tried = False
+
+
+def restore_be():
+    """Reconstruct the last-saved BE version from Supabase Storage, or None."""
+    meta = supabase_io.load_be_meta()
+    be_bytes = supabase_io.load_be_file()
+    if not meta or not be_bytes or not meta.get("sheet") or not meta.get("month"):
+        return None
+    rows = parse_be(be_bytes, meta["sheet"])
+    if not rows:
+        return None
+    label, y, m0 = be_logic.month_label_from_value(meta["month"])
+    return be_logic.BeVersion(
+        upload_date=meta.get("uploaded", ""), month_label=label, month_y=y, month_m=m0,
+        week=meta.get("week", ""), sheet=meta["sheet"], rows=rows,
+        total_be=sum(r["total"] for r in rows))
 
 
 def get_data():
@@ -99,6 +117,12 @@ if df is None or not len(df):
     st.info("Upload your Excel file. The dashboard reads the **Order** sheet "
             "(and an **Invoice** sheet if present) and builds all metrics.")
     st.stop()
+
+# Restore the last-saved BE once per session (after order data is available)
+if (st.session_state.be_version is None and not st.session_state.be_restore_tried
+        and supabase_io.is_configured()):
+    st.session_state.be_restore_tried = True
+    st.session_state.be_version = restore_be()
 
 
 # --------------------------------------------------------------------------- #
@@ -351,6 +375,9 @@ with tab_be:
                         rows=rows, total_be=total)
                     if supabase_io.is_configured():
                         supabase_io.save_be_file(be_bytes)
+                        supabase_io.save_be_meta({
+                            "sheet": sheet, "month": month_val, "week": week.strip(),
+                            "uploaded": datetime.now().isoformat()})
                     st.success(f"BE loaded: {label} · {len({r['distNorm'] for r in rows})} "
                                f"distributors · {data.fmt(total)} MT")
                     st.rerun()

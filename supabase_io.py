@@ -6,6 +6,7 @@ runs, it just won't persist files between sessions. Errors are captured in
 """
 from __future__ import annotations
 
+import json
 import os
 
 from dotenv import load_dotenv
@@ -41,6 +42,7 @@ def bucket() -> str:
 
 ORDER_FILE = "latest_order.xlsx"
 BE_FILE = "latest_be.xlsx"
+BE_META_FILE = "latest_be_meta.json"
 
 _client = None
 _last_error: str | None = None
@@ -148,9 +150,23 @@ def save_be_file(data: bytes) -> bool:
     return upload_bytes(BE_FILE, data)
 
 
+def save_be_meta(meta: dict) -> bool:
+    return upload_bytes(BE_META_FILE, json.dumps(meta).encode("utf-8"))
+
+
 def load_order_file() -> bytes | None:
     return download_bytes(ORDER_FILE)
 
 
 def load_be_file() -> bytes | None:
     return download_bytes(BE_FILE)
+
+
+def load_be_meta() -> dict | None:
+    raw = download_bytes(BE_META_FILE)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
