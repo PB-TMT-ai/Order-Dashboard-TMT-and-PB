@@ -12,9 +12,32 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "jsw-dashboard")
+
+def _cfg(key: str, default: str = "") -> str:
+    """Read config from OS env (local/.env) or st.secrets (Streamlit Cloud)."""
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        import streamlit as st
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:  # noqa: BLE001 — no secrets file / not in a Streamlit run
+        pass
+    return default
+
+
+def supabase_url() -> str:
+    return _cfg("SUPABASE_URL")
+
+
+def supabase_key() -> str:
+    return _cfg("SUPABASE_KEY")
+
+
+def bucket() -> str:
+    return _cfg("SUPABASE_BUCKET", "jsw-dashboard")
+
 
 ORDER_FILE = "latest_order.xlsx"
 BE_FILE = "latest_be.xlsx"
@@ -28,7 +51,7 @@ def last_error() -> str | None:
 
 
 def is_configured() -> bool:
-    return bool(SUPABASE_URL and SUPABASE_KEY)
+    return bool(supabase_url() and supabase_key())
 
 
 def _get_client():
@@ -40,7 +63,7 @@ def _get_client():
         return None
     try:
         from supabase import create_client
-        _client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        _client = create_client(supabase_url(), supabase_key())
     except Exception as exc:  # noqa: BLE001
         _last_error = f"create_client failed: {exc}"
         _client = None
@@ -56,12 +79,12 @@ def check_connection() -> tuple[bool, str]:
     if client is None:
         return False, _last_error or "Could not create client."
     try:
-        client.storage.from_(SUPABASE_BUCKET).list()
+        client.storage.from_(bucket()).list()
         _last_error = None
-        return True, f"Connected · bucket '{SUPABASE_BUCKET}'"
+        return True, f"Connected · bucket '{bucket()}'"
     except Exception as exc:  # noqa: BLE001
         _last_error = str(exc)
-        return False, f"Bucket '{SUPABASE_BUCKET}' not reachable: {exc}"
+        return False, f"Bucket '{bucket()}' not reachable: {exc}"
 
 
 def upload_bytes(name: str, data: bytes) -> bool:
@@ -70,7 +93,7 @@ def upload_bytes(name: str, data: bytes) -> bool:
     if client is None:
         return False
     try:
-        client.storage.from_(SUPABASE_BUCKET).upload(
+        client.storage.from_(bucket()).upload(
             path=name, file=data,
             file_options={"content-type": "application/octet-stream", "upsert": "true"},
         )
@@ -87,7 +110,7 @@ def download_bytes(name: str) -> bytes | None:
     if client is None:
         return None
     try:
-        return client.storage.from_(SUPABASE_BUCKET).download(name)
+        return client.storage.from_(bucket()).download(name)
     except Exception as exc:  # noqa: BLE001
         _last_error = str(exc)
         return None
