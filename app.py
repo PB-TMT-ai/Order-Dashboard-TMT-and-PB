@@ -5,6 +5,7 @@ complete; some tabs are marked TODO for the iteration session (see README).
 """
 from __future__ import annotations
 
+import html
 import io
 from datetime import datetime
 
@@ -150,35 +151,130 @@ filtered = data.apply_filters(df, f)
 # --------------------------------------------------------------------------- #
 # KPI strip
 # --------------------------------------------------------------------------- #
+_KPI_CSS = """
+<style>
+.kpi-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:10px}
+.kc{background:#fff;border-radius:8px;padding:12px 14px;
+    box-shadow:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04);
+    border-left:4px solid transparent}
+.kc.k-or{border-left-color:#6366F1}
+.kc.k-re{border-left-color:#F59E0B}
+.kc.k-in{border-left-color:#10B981}
+.kc.k-inp{border-left-color:#0EA5E9}
+.kc.k-gap{border-left-color:#8B5CF6}
+.kl{font-size:10px;color:#64748B;font-weight:600;text-transform:uppercase;
+    letter-spacing:.4px;margin-bottom:3px}
+.kgaplbl{font-weight:400;color:#94A3B8;font-size:9px}
+.kv{font-size:22px;font-weight:700;line-height:1.1;color:#1E293B}
+.kv.dn{color:#EF4444}.kv.up{color:#10B981}
+.ku{font-size:11px;font-weight:400;color:#64748B;margin-left:2px}
+.ks{font-size:11px;color:#64748B;margin-top:3px}
+.ch-subs{margin-top:4px}
+.ch-sub{display:flex;justify-content:space-between;font-size:10px;padding:1px 0;
+    color:#64748B;border-top:1px solid #F1F5F9;margin-top:2px}
+.ch-sub:first-of-type{margin-top:6px;border-top:1px solid #E2E8F0;padding-top:4px}
+.ch-sub b{color:#1E293B;font-weight:600}
+.ibar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.ic{background:#fff;border:1px solid #E2E8F0;border-radius:6px;padding:6px 11px;
+    font-size:11px;color:#64748B;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.iv{font-weight:700;font-size:13px;color:#1B3A6B;display:block;margin-bottom:1px}
+</style>
+"""
+
+_CH_ROWS = [("Retail", "rt"), ("Self-stocking", "ss"),
+            ("Project (direct)", "pdir"), ("Project thru Dist", "pd")]
+
+
+def _ch_subs(ch: dict) -> str:
+    return "".join(
+        f'<div class="ch-sub"><span>{lbl}</span><b>{data.fmt(ch.get(k, 0))}</b></div>'
+        for lbl, k in _CH_ROWS)
+
+
+def _kpi_card(cls: str, label: str, value: str, sub: str,
+              ch_html: str = "", value_cls: str = "") -> str:
+    return (
+        f'<div class="kc {cls}">'
+        f'<div class="kl">{label}</div>'
+        f'<div class="kv {value_cls}">{value}<span class="ku">MT</span></div>'
+        f'<div class="ks">{html.escape(sub)}</div>'
+        f'<div class="ch-subs">{ch_html}</div>'
+        f'</div>'
+    )
+
+
 kpis = data.compute_kpis(filtered)
 period = data.get_active_period(f)
 
-# Invoiced-in-period (invoice-date scoped, ignores order-date filter)
+# Invoiced-in-period (invoice-date scoped, ignores order-date filter), per channel
 nd = data.apply_non_date_filters(df, f)
-if period:
-    inv_in_period = float(
-        nd.apply(lambda r: data.invoiced_in_range(r, period["from"], period["to"], inv_index),
-                 axis=1).sum()) if len(nd) else 0.0
+ch_inp = {c: 0.0 for c in ("rt", "ss", "pdir", "pd")}
+if len(nd):
+    if period:
+        iip = nd.apply(
+            lambda r: data.invoiced_in_range(r, period["from"], period["to"], inv_index),
+            axis=1)
+    else:
+        iip = nd["_iq"]
+    inv_in_period = float(iip.sum())
+    for ch, val in iip.groupby(nd["_ch"]).sum().items():
+        ch_inp[ch] = float(val)
 else:
-    inv_in_period = float(nd["_iq"].sum()) if len(nd) else 0.0
+    inv_in_period = 0.0
 
 be = st.session_state.be_version
 ag = be_logic.be_actuals_agg(filtered, be, inv_index) if be else None
 
-k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Ordered (MT)", data.fmt(kpis.ordered), f"{kpis.line_items:,} lines")
-k2.metric("Released (MT)", data.fmt(kpis.released),
-          f"{round(kpis.released / kpis.ordered * 100) if kpis.ordered else 0}% of ordered")
-k3.metric("Invoiced (MT)", data.fmt(kpis.invoiced),
-          f"{round(kpis.invoiced / kpis.ordered * 100) if kpis.ordered else 0}% of ordered")
-k4.metric("Invoiced in period (MT)", data.fmt(inv_in_period),
-          period["label"] if period else "All time")
+_pct = lambda part: f"{round(part / kpis.ordered * 100) if kpis.ordered else 0}% of ordered"
+cards = [
+    _kpi_card("k-or", "Ordered", data.fmt(kpis.ordered),
+              f"{kpis.line_items:,} line items", _ch_subs(kpis.ch_or)),
+    _kpi_card("k-re", "Released", data.fmt(kpis.released),
+              _pct(kpis.released), _ch_subs(kpis.ch_re)),
+    _kpi_card("k-in", "Invoiced ⓘ", data.fmt(kpis.invoiced),
+              _pct(kpis.invoiced), _ch_subs(kpis.ch_in)),
+    _kpi_card("k-inp", "Invoiced in period ⓘ", data.fmt(inv_in_period),
+              period["label"] if period else "All time", _ch_subs(ch_inp)),
+]
 if ag:
-    gap = ag.tot_be - ag.matched_act
-    k5.metric(f"BE gap — {be.month_label}", data.fmt(gap),
-              f"{data.fmt(ag.matched_act)} / {data.fmt(ag.tot_be)} MT")
+    gap = ag.matched_act - ag.tot_be  # negative ⇒ behind plan
+    wk = f" {be.week}" if be.week else ""
+    cards.append(_kpi_card(
+        "k-gap", f'BE gap <span class="kgaplbl">({be.month_label}{wk})</span>',
+        data.fmt(gap), f"BE {data.fmt(ag.tot_be)} · Inv {data.fmt(ag.matched_act)}",
+        value_cls="dn" if gap < 0 else "up"))
 else:
-    k5.metric("BE gap", "—", "load a BE file")
+    cards.append(_kpi_card("k-gap", "BE gap", "—", "load a BE file"))
+
+st.markdown(_KPI_CSS + '<div class="kpi-row">' + "".join(cards) + "</div>",
+            unsafe_allow_html=True)
+
+# Info bar chips
+st_sum = filtered.groupby("_st")["_q"].sum() if len(filtered) else None
+top_st = st_sum.idxmax() if st_sum is not None and len(st_sum) and st_sum.max() > 0 else None
+cm_sum = filtered.groupby("_cm")["_q"].sum() if len(filtered) else None
+top_cm = cm_sum.idxmax() if cm_sum is not None and len(cm_sum) and cm_sum.max() > 0 else None
+pending = max(kpis.ordered - kpis.released, 0.0)
+pend_inv = max(kpis.released - kpis.invoiced, 0.0)
+pts = float(filtered.loc[filtered["_pt"] == "P&T", "_q"].sum()) if len(filtered) else 0.0
+dist_cnt = int(filtered.loc[filtered["_dis"] == "Yes", "_dn"].nunique()) if len(filtered) else 0
+
+chips = []
+if top_st:
+    chips.append((f"{data.fmt(st_sum.max())} MT", f"🏆 Top state: {top_st}"))
+chips.append((f"{data.fmt(pending)} MT", "⏳ Pending release"))
+chips.append((f"{data.fmt(pend_inv)} MT", "📋 Released, not invoiced"))
+if top_cm:
+    chips.append((" ".join(str(top_cm).split()[:2]), "🏭 Top plant"))
+if pts > 0:
+    chips.append((f"{data.fmt(pts)} MT", "🔧 P&T volume"))
+chips.append((f"{dist_cnt:,}", "🤝 Active distributors"))
+
+st.markdown(
+    '<div class="ibar">' + "".join(
+        f'<div class="ic"><span class="iv">{html.escape(str(v))}</span>'
+        f'{html.escape(lbl)}</div>' for v, lbl in chips) + "</div>",
+    unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
