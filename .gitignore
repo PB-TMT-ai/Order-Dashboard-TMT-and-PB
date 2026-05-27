@@ -1,0 +1,17 @@
+CLAUDE.local.md
+.workspace/
+*.tmp
+.env
+.env.local
+.env.*.local
+node_modules/
+dist/
+build/
+.next/
+out/
+.vscode/
+.idea/
+.DS_Store
+*.log
+coverage/
+*.tsbuildinfo
