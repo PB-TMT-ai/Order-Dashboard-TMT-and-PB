@@ -33,17 +33,31 @@ def _excel_file(file_bytes: bytes):
         return pd.ExcelFile(io.BytesIO(file_bytes))
 
 
+_ORDER_COLS = set(data.K.values())
+_INVOICE_COLS = {"Order ID", "Invoice date", "Invoiced qty", "Invoice number"}
+
+
 def parse_order_workbook(file_bytes: bytes):
-    """Read the Order + Invoice sheets and return (enriched_df, inv_index)."""
+    """Read the Order + Invoice sheets and return (enriched_df, inv_index).
+
+    Only the columns the dashboard actually uses are read — large exports often
+    carry 100+ columns, and dropping the rest keeps memory in check.
+    """
     xls = _excel_file(file_bytes)
     inv_index = {}
     inv_sheet = next((s for s in xls.sheet_names if s.lower() == "invoice"), None) \
         or next((s for s in xls.sheet_names if "invoice" in s.lower()), None)
     if inv_sheet:
-        inv_index = data.build_invoice_index(pd.read_excel(xls, sheet_name=inv_sheet))
+        inv_df = pd.read_excel(xls, sheet_name=inv_sheet,
+                               usecols=lambda c: c in _INVOICE_COLS)
+        inv_index = data.build_invoice_index(inv_df)
+        del inv_df
 
     order_sheet = next((s for s in xls.sheet_names if "order" in s.lower()), xls.sheet_names[0])
-    enriched = data.enrich(pd.read_excel(xls, sheet_name=order_sheet), inv_index)
+    order_df = pd.read_excel(xls, sheet_name=order_sheet,
+                             usecols=lambda c: c in _ORDER_COLS)
+    enriched = data.enrich(order_df, inv_index)
+    del order_df
     return enriched, inv_index
 
 
