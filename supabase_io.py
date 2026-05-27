@@ -50,6 +50,29 @@ def last_error() -> str | None:
     return _last_error
 
 
+def _http_detail(exc: BaseException) -> str:
+    """Recover the real HTTP status/body from an exception chain.
+
+    storage3 2.30.0 has a bug where an API error response is re-raised as
+    'dict object has no attribute text', masking the real cause. The original
+    httpx error (with .response) is still in the __context__/__cause__ chain.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        resp = getattr(cur, "response", None)
+        if resp is not None:
+            try:
+                body = resp.text
+            except Exception:  # noqa: BLE001
+                body = ""
+            status = getattr(resp, "status_code", "?")
+            return f"HTTP {status}: {body[:300]}".strip()
+        cur = cur.__cause__ or cur.__context__
+    return str(exc) or exc.__class__.__name__
+
+
 def is_configured() -> bool:
     return bool(supabase_url() and supabase_key())
 
@@ -83,8 +106,9 @@ def check_connection() -> tuple[bool, str]:
         _last_error = None
         return True, f"Connected · bucket '{bucket()}'"
     except Exception as exc:  # noqa: BLE001
-        _last_error = str(exc)
-        return False, f"Bucket '{bucket()}' not reachable: {exc}"
+        detail = _http_detail(exc)
+        _last_error = detail
+        return False, f"Bucket '{bucket()}' check failed — {detail}"
 
 
 def upload_bytes(name: str, data: bytes) -> bool:
@@ -100,7 +124,7 @@ def upload_bytes(name: str, data: bytes) -> bool:
         _last_error = None
         return True
     except Exception as exc:  # noqa: BLE001
-        _last_error = str(exc)
+        _last_error = _http_detail(exc)
         return False
 
 
@@ -112,7 +136,7 @@ def download_bytes(name: str) -> bytes | None:
     try:
         return client.storage.from_(bucket()).download(name)
     except Exception as exc:  # noqa: BLE001
-        _last_error = str(exc)
+        _last_error = _http_detail(exc)
         return None
 
 
