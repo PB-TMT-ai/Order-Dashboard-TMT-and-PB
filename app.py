@@ -411,6 +411,51 @@ st.markdown(
     unsafe_allow_html=True)
 
 
+# ─── Inject card / pill control CSS once for the rest of the page ───────────
+st.markdown(theme.CARD_CSS, unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------- #
+# Chart-card helper
+# --------------------------------------------------------------------------- #
+def _chart_header(title: str, subtitle: str, *, csv_df: pd.DataFrame | None = None,
+                  csv_name: str = "data.csv", key: str = "",
+                  controls=None) -> object | None:
+    """Render a card header row: title+subtitle (left) | CSV button | controls.
+
+    `controls` (optional) is a callable rendered into the right-most column;
+    its return value is passed back so the caller can act on it.
+    """
+    has_ctrl = controls is not None
+    has_csv = csv_df is not None
+    if has_ctrl and has_csv:
+        ratios = [5, 1, 2]
+    elif has_csv or has_ctrl:
+        ratios = [6, 1] if has_csv else [4, 2]
+    else:
+        ratios = [1]
+    cols = st.columns(ratios)
+    with cols[0]:
+        st.markdown(f'<div class="chart-title">{html.escape(title)}</div>',
+                    unsafe_allow_html=True)
+        if subtitle:
+            st.markdown(f'<div class="chart-sub">{html.escape(subtitle)}</div>',
+                        unsafe_allow_html=True)
+    idx = 1
+    if has_csv:
+        with cols[idx]:
+            st.download_button(
+                "⇩ CSV", csv_df.to_csv(index=False).encode("utf-8"),
+                file_name=csv_name, key=f"dl_{key}", mime="text/csv",
+                use_container_width=True)
+        idx += 1
+    ctrl_value = None
+    if has_ctrl:
+        with cols[idx]:
+            ctrl_value = controls()
+    return ctrl_value
+
+
 # --------------------------------------------------------------------------- #
 # Tabs
 # --------------------------------------------------------------------------- #
@@ -419,38 +464,97 @@ tab_ov, tab_be, tab_dr, tab_oh, tab_cp, tab_sc, tab_ln = st.tabs(
      "Period compare", "Scheme analysis", "Line items"])
 
 with tab_ov:
-    gran = st.radio("Granularity", ["day", "week", "month", "year"], index=2,
-                    horizontal=True, key="gran")
-    st.subheader("Order trend by channel")
-    st.caption("Click a legend entry to isolate that line; double-click to restore all.")
-    st.plotly_chart(plots.channel_trend(filtered, gran), use_container_width=True)
+    # ── Order trend by channel ──────────────────────────────────────────────
+    with st.container(border=True):
+        def _gran_ctrl():
+            return st.radio(" ", ["Day", "Week", "Month", "Year"], index=2,
+                            horizontal=True, key="gran",
+                            label_visibility="collapsed")
+        # Build the chart's underlying data for CSV export
+        _trend = filtered[filtered["_d"].notna()].copy()
+        _trend_csv = (_trend.assign(_dt=_trend["_d"].dt.date)
+                      .groupby(["_dt", "_ch"])["_q"].sum().reset_index()
+                      .rename(columns={"_dt": "Date", "_ch": "Channel",
+                                       "_q": "Ordered MT"})) if len(_trend) \
+            else pd.DataFrame(columns=["Date", "Channel", "Ordered MT"])
+        gran_label = _chart_header(
+            "Order trend by channel",
+            "Ordered MT split by channel. Click a legend entry to isolate; double-click to restore.",
+            csv_df=_trend_csv, csv_name="order_trend.csv", key="trend",
+            controls=_gran_ctrl,
+        )
+        gran = (gran_label or "Month").lower()
+        st.plotly_chart(plots.channel_trend(filtered, gran),
+                        use_container_width=True)
 
+    # ── Top 10 ship-to states / Grade mix ───────────────────────────────────
     g1, g2 = st.columns(2)
     with g1:
-        st.subheader("Top 10 ship-to states")
-        st.plotly_chart(plots.top_states(filtered), use_container_width=True)
+        with st.container(border=True):
+            _states_csv = (filtered.groupby("_st")["_q"].sum().reset_index()
+                           .sort_values("_q", ascending=False).head(10)
+                           .rename(columns={"_st": "Ship-to state",
+                                            "_q": "Ordered MT"}))
+            _chart_header("Top 10 ship-to states", "By Ordered MT",
+                          csv_df=_states_csv, csv_name="top_states.csv",
+                          key="states")
+            st.plotly_chart(plots.top_states(filtered), use_container_width=True)
     with g2:
-        st.subheader("Grade mix")
-        st.plotly_chart(plots.grade_mix(filtered), use_container_width=True)
+        with st.container(border=True):
+            _grade_csv = (filtered.groupby("_gr")["_q"].sum().reset_index()
+                          .rename(columns={"_gr": "Grade", "_q": "Ordered MT"})
+                          .sort_values("Ordered MT", ascending=False))
+            _chart_header("Grade mix", "Share of Ordered MT by grade",
+                          csv_df=_grade_csv, csv_name="grade_mix.csv",
+                          key="grade")
+            st.plotly_chart(plots.grade_mix(filtered), use_container_width=True)
 
+    # ── Top 10 distributors / Dispatch plant mix ────────────────────────────
     g3, g4 = st.columns(2)
     with g3:
-        st.subheader("Top 10 distributors")
-        st.plotly_chart(plots.top_distributors(filtered), use_container_width=True)
+        with st.container(border=True):
+            _dist_csv = (filtered.groupby("_dn")["_q"].sum().reset_index()
+                         .sort_values("_q", ascending=False).head(10)
+                         .rename(columns={"_dn": "Distributor",
+                                          "_q": "Ordered MT"}))
+            _chart_header("Top 10 distributors", "By Ordered MT",
+                          csv_df=_dist_csv, csv_name="top_distributors.csv",
+                          key="dist")
+            st.plotly_chart(plots.top_distributors(filtered),
+                            use_container_width=True)
     with g4:
-        st.subheader("Dispatch plant mix")
-        st.plotly_chart(plots.plant_mix(filtered), use_container_width=True)
+        with st.container(border=True):
+            _plant_csv = (filtered.groupby("_cm")["_q"].sum().reset_index()
+                          .rename(columns={"_cm": "CM / Plant",
+                                           "_q": "Ordered MT"})
+                          .sort_values("Ordered MT", ascending=False))
+            _chart_header("Dispatch plant mix", "Share of Ordered MT by plant",
+                          csv_df=_plant_csv, csv_name="plant_mix.csv",
+                          key="plant")
+            st.plotly_chart(plots.plant_mix(filtered), use_container_width=True)
 
-    st.subheader("India heat map — Ship-to state")
-    metric_opt = st.selectbox("Metric", ["Ordered MT", "Released MT", "Invoiced MT", "Line count"])
-    metric_col = {"Ordered MT": "_q", "Released MT": "_rq", "Invoiced MT": "_iq"}.get(metric_opt)
-    if metric_col:
-        sv = filtered.groupby("_st")[metric_col].sum().reset_index()
-    else:
-        sv = filtered.groupby("_st").size().reset_index(name="value")
-        sv = sv.rename(columns={0: "value"})
-    sv.columns = ["state", "value"]
-    st.plotly_chart(plots.india_map(sv, metric_opt), use_container_width=True)
+    # ── India heat map ──────────────────────────────────────────────────────
+    with st.container(border=True):
+        def _metric_ctrl():
+            return st.radio(" ", ["Ordered MT", "Released MT",
+                                  "Invoiced MT", "Line count"],
+                            index=0, horizontal=True, key="map_metric",
+                            label_visibility="collapsed")
+        metric_opt = _chart_header(
+            "India heat map — Ship-to state",
+            "Color intensity scales with the selected metric.",
+            csv_df=None, key="map", controls=_metric_ctrl,
+        ) or "Ordered MT"
+        metric_col = {"Ordered MT": "_q", "Released MT": "_rq",
+                      "Invoiced MT": "_iq"}.get(metric_opt)
+        if metric_col:
+            sv = filtered.groupby("_st")[metric_col].sum().reset_index()
+        else:
+            sv = filtered.groupby("_st").size().reset_index(name="value")
+            sv = sv.rename(columns={0: "value"})
+        sv.columns = ["state", "value"]
+        st.plotly_chart(plots.india_map(sv, metric_opt),
+                        use_container_width=True)
 
 with tab_be:
     st.subheader("Vs Best Estimate")

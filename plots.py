@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 from data import CHANNEL_LABELS, MOS
 from theme import (
     CHANNEL_COLORS, GAP_GRADIENT, JSW_NAVY, JSW_RED, MUTED_TEXT,
-    SEQ_GRADIENT, isolate_on_hover,
+    RANKING_DIST, RANKING_STATES, SEQ_GRADIENT, isolate_on_hover,
 )
 
 # India states GeoJSON (Datameet, ISO names). Loaded lazily; map degrades to a
@@ -24,12 +24,13 @@ INDIA_GEOJSON_URL = (
     "https://raw.githubusercontent.com/geohacker/india/master/state/india_telengana.geojson"
 )
 
-# Semi-transparent fills under line traces (per channel).
+# Semi-transparent fills under line traces (per channel — must align with
+# CHANNEL_COLORS hue).
 _CHANNEL_FILL = {
-    "rt": "rgba(0,46,93,.10)",
-    "ss": "rgba(245,158,11,.10)",
-    "pdir": "rgba(16,185,129,.10)",
-    "pd": "rgba(237,28,36,.10)",
+    "rt": "rgba(99,102,241,.08)",     # indigo
+    "ss": "rgba(16,185,129,.08)",     # emerald
+    "pdir": "rgba(245,158,11,.08)",   # orange
+    "pd": "rgba(139,92,246,.08)",     # purple
 }
 
 
@@ -63,12 +64,14 @@ def channel_trend(df: pd.DataFrame, gran: str = "month") -> go.Figure:
         series = sub.groupby("_k")["_q"].sum().reindex(keys, fill_value=0)
         fig.add_scatter(
             x=keys, y=series.values, mode="lines+markers", name=label,
-            line=dict(color=CHANNEL_COLORS[ch], width=2.5),
+            line=dict(color=CHANNEL_COLORS[ch], width=2.5, shape="spline",
+                      smoothing=0.8),
             marker=dict(size=6),
             fill="tozeroy", fillcolor=_CHANNEL_FILL[ch],
             hovertemplate=f"<b>{label}</b><br>%{{x}}<br>%{{y:,.0f}} MT<extra></extra>",
         )
-    fig.update_layout(height=320, yaxis_title="Ordered MT")
+    fig.update_layout(height=340, yaxis_title="Ordered MT",
+                      legend=dict(orientation="h", y=-0.18))
     return isolate_on_hover(fig)
 
 
@@ -91,13 +94,13 @@ def _hbar(df: pd.DataFrame, label_col: str, value_col: str, title: str,
 def top_states(df: pd.DataFrame, n: int = 10) -> go.Figure:
     agg = (df.groupby("_st")["_q"].sum().reset_index()
            .sort_values("_q", ascending=False).head(n)) if len(df) else pd.DataFrame()
-    return _hbar(agg, "_st", "_q", "Ordered MT", JSW_NAVY)
+    return _hbar(agg, "_st", "_q", "Ordered MT", RANKING_STATES)
 
 
 def top_distributors(df: pd.DataFrame, n: int = 10) -> go.Figure:
     agg = (df.groupby("_dn")["_q"].sum().reset_index()
            .sort_values("_q", ascending=False).head(n)) if len(df) else pd.DataFrame()
-    return _hbar(agg, "_dn", "_q", "Ordered MT", JSW_RED)
+    return _hbar(agg, "_dn", "_q", "Ordered MT", RANKING_DIST)
 
 
 def _pie(df: pd.DataFrame, label_col: str, value_col: str, n: int = 10) -> go.Figure:
@@ -227,7 +230,8 @@ def be_trajectory(daily_map: dict[str, float], be_total: float,
     pace = [be_total * d / days_in_month for d in days]
     fig.add_scatter(
         x=days, y=cum, mode="lines+markers", name="Cumulative invoiced",
-        line=dict(color="#10B981", width=2.5), marker=dict(size=6),
+        line=dict(color="#10B981", width=2.5, shape="spline", smoothing=0.8),
+        marker=dict(size=6),
         fill="tozeroy", fillcolor="rgba(16,185,129,.10)",
         hovertemplate="Day %{x}<br>%{y:,.0f} MT<extra>Cumulative</extra>",
     )
@@ -236,8 +240,8 @@ def be_trajectory(daily_map: dict[str, float], be_total: float,
         line=dict(color=JSW_NAVY, width=2, dash="dash"),
         hovertemplate="Day %{x}<br>%{y:,.0f} MT<extra>BE pace</extra>",
     )
-    fig.update_layout(height=320, xaxis_title=f"Day of {month_label}",
-                      yaxis_title="MT")
+    fig.update_layout(height=340, xaxis_title=f"Day of {month_label}",
+                      yaxis_title="MT", legend=dict(orientation="h", y=-0.18))
     return isolate_on_hover(fig)
 
 
