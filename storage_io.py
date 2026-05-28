@@ -166,16 +166,47 @@ def _parquet_bytes_to_df(b: bytes) -> pd.DataFrame:
     return pd.read_parquet(io.BytesIO(b), engine="pyarrow")
 
 
+def _clean_invoices_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce invoice columns to clean, parquet-safe types.
+
+    Source columns can be a mix (e.g. invoice numbers that are sometimes
+    numeric, sometimes alphanumeric) which Arrow refuses to infer.
+    """
+    out = pd.DataFrame(index=df.index)
+    if "Order ID" in df.columns:
+        out["Order ID"] = df["Order ID"].astype(str)
+    if "Invoice date" in df.columns:
+        out["Invoice date"] = pd.to_datetime(df["Invoice date"], errors="coerce")
+    if "Invoiced qty" in df.columns:
+        out["Invoiced qty"] = pd.to_numeric(df["Invoiced qty"], errors="coerce").fillna(0.0)
+    if "Invoice number" in df.columns:
+        out["Invoice number"] = df["Invoice number"].astype(str)
+    return out
+
+
 def save_processed(orders_df: pd.DataFrame, invoices_df: pd.DataFrame | None) -> bool:
     """Persist the processed order frame + raw invoice lines as compact Parquet.
 
     Replaces the older approach of saving the full raw Excel — those files
     were too large to load on Streamlit Cloud's RAM. Parquet keeps only what
-    the dashboard needs, in a columnar/compressed format.
+    the dashboard needs, in a columnar/compressed format. Errors during
+    conversion or upload are captured (don't crash the page); the dashboard
+    still works for the current session.
     """
-    ok = upload_bytes(PROCESSED_ORDERS_FILE, _df_to_parquet_bytes(orders_df))
+    global _last_error
+    try:
+        orders_bytes = _df_to_parquet_bytes(orders_df)
+    except Exception as exc:  # noqa: BLE001
+        _last_error = f"orders parquet conversion failed: {exc}"
+        return False
+    ok = upload_bytes(PROCESSED_ORDERS_FILE, orders_bytes)
     if invoices_df is not None and len(invoices_df):
-        ok = upload_bytes(PROCESSED_INVOICES_FILE, _df_to_parquet_bytes(invoices_df)) and ok
+        try:
+            inv_bytes = _df_to_parquet_bytes(_clean_invoices_for_parquet(invoices_df))
+        except Exception as exc:  # noqa: BLE001
+            _last_error = f"invoices parquet conversion failed: {exc}"
+            return False
+        ok = upload_bytes(PROCESSED_INVOICES_FILE, inv_bytes) and ok
     return ok
 
 
