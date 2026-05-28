@@ -15,14 +15,65 @@ INDIA_GEOJSON_URL = (
     "https://raw.githubusercontent.com/geohacker/india/master/state/india_telengana.geojson"
 )
 
+# Channel palette — JSW navy family anchors the "project" channels; retail and
+# self-stocking stay as warmer accents. Hues + luminance both differ so the four
+# remain distinguishable under deuteranopia / protanopia.
 _PALETTE = {
-    "rt": "#6366F1",    # ordered/indigo
-    "ss": "#F59E0B",    # amber
-    "pdir": "#10B981",  # green
-    "pd": "#0EA5E9",    # accent
+    "rt": "#6366F1",    # retail — indigo
+    "ss": "#F59E0B",    # self-stocking — amber
+    "pdir": "#1B3A6B",  # project-direct — JSW navy
+    "pd": "#2563EB",    # project-thru-dist — JSW blue
+}
+# Semi-transparent fills for line-area mode (must align with _PALETTE order).
+_PALETTE_FILL = {
+    "rt": "rgba(99,102,241,.10)",
+    "ss": "rgba(245,158,11,.10)",
+    "pdir": "rgba(27,58,107,.12)",
+    "pd": "rgba(37,99,235,.10)",
 }
 _PRIMARY = "#1B3A6B"
 _PRIMARY2 = "#2563EB"
+
+_FONT_FAMILY = "Inter, system-ui, -apple-system, 'Segoe UI', sans-serif"
+
+
+def _apply_jsw_layout(
+    fig: go.Figure,
+    *,
+    height: int = 300,
+    y_title: str | None = None,
+    x_title: str | None = None,
+    show_legend: bool = True,
+) -> go.Figure:
+    """Apply consistent JSW typography, gridlines, legend, and hover styling."""
+    fig.update_layout(
+        font=dict(family=_FONT_FAMILY, size=12, color="#0F172A"),
+        plot_bgcolor="#FFFFFF",
+        paper_bgcolor="#FFFFFF",
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=height,
+        showlegend=show_legend,
+        legend=dict(
+            orientation="h", y=-0.18, x=0,
+            font=dict(size=11, color="#475569"),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        hoverlabel=dict(
+            bgcolor="#FFFFFF", bordercolor="#CBD5E1",
+            font=dict(family=_FONT_FAMILY, size=12, color="#0F172A"),
+        ),
+    )
+    fig.update_xaxes(
+        gridcolor="#F1F5F9", zerolinecolor="#E2E8F0", linecolor="#E2E8F0",
+        title=dict(text=x_title, font=dict(size=11, color="#475569")) if x_title else None,
+        tickfont=dict(size=11, color="#475569"),
+    )
+    fig.update_yaxes(
+        gridcolor="#F1F5F9", zerolinecolor="#E2E8F0", linecolor="#E2E8F0",
+        title=dict(text=y_title, font=dict(size=11, color="#475569")) if y_title else None,
+        tickfont=dict(size=11, color="#475569"),
+    )
+    return fig
 
 
 def _gran_key(d: datetime | None, gran: str) -> str:
@@ -56,15 +107,17 @@ def channel_trend(df: pd.DataFrame, gran: str = "month", chart_type: str = "line
         if chart_type == "bar":
             fig.add_bar(x=keys, y=series.values, name=label, marker_color=_PALETTE[ch])
         else:
-            fig.add_scatter(x=keys, y=series.values, mode="lines+markers",
-                            name=label, line=dict(color=_PALETTE[ch], width=2))
+            fig.add_scatter(
+                x=keys, y=series.values, mode="lines+markers", name=label,
+                line=dict(color=_PALETTE[ch], width=2.5),
+                marker=dict(size=6),
+                fill="tozeroy", fillcolor=_PALETTE_FILL[ch],
+            )
     fig.update_layout(
         barmode="stack" if chart_type == "bar" else None,
-        legend=dict(orientation="h", y=-0.2),
-        margin=dict(l=10, r=10, t=10, b=10), height=300,
-        yaxis_title="Ordered MT", hovermode="x unified",
+        hovermode="x unified",
     )
-    return fig
+    return _apply_jsw_layout(fig, y_title="Ordered MT")
 
 
 def _hbar(df: pd.DataFrame, label_col: str, value_col: str, title: str,
@@ -73,10 +126,12 @@ def _hbar(df: pd.DataFrame, label_col: str, value_col: str, title: str,
     if not len(df):
         return _empty(fig, "No data")
     d = df.sort_values(value_col, ascending=True)
-    fig.add_bar(x=d[value_col], y=d[label_col], orientation="h", marker_color=color)
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=300,
-                      xaxis_title=title)
-    return fig
+    fig.add_bar(
+        x=d[value_col], y=d[label_col], orientation="h", marker_color=color,
+        texttemplate="%{x:,.0f}", textposition="outside",
+        textfont=dict(size=11, color="#334155"), cliponaxis=False,
+    )
+    return _apply_jsw_layout(fig, x_title=title, show_legend=False)
 
 
 def top_states(df: pd.DataFrame, n: int = 10) -> go.Figure:
@@ -102,10 +157,13 @@ def _pie(df: pd.DataFrame, label_col: str, value_col: str, n: int = 10) -> go.Fi
         other = agg[value_col][n:].sum()
         head = pd.concat([head, pd.DataFrame([{label_col: "Other", value_col: other}])])
         agg = head
-    fig.add_pie(labels=agg[label_col], values=agg[value_col], hole=0.5)
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=300,
-                      legend=dict(orientation="v", font=dict(size=10)))
-    return fig
+    fig.add_pie(
+        labels=agg[label_col], values=agg[value_col], hole=0.55,
+        marker=dict(line=dict(color="#FFFFFF", width=2)),
+        textfont=dict(size=11, color="#0F172A"),
+    )
+    fig.update_layout(legend=dict(orientation="v", font=dict(size=10)))
+    return _apply_jsw_layout(fig)
 
 
 def grade_mix(df: pd.DataFrame) -> go.Figure:
@@ -134,16 +192,28 @@ def india_map(state_values: pd.DataFrame, metric_label: str) -> go.Figure:
             color_continuous_scale=["#EEF4FA", _PRIMARY],
         )
         fig.update_geos(fitbounds="locations", visible=False)
-        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=520,
-                          coloraxis_colorbar_title=metric_label)
+        fig.update_layout(
+            font=dict(family=_FONT_FAMILY, size=12, color="#0F172A"),
+            plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF",
+            margin=dict(l=0, r=0, t=0, b=0), height=520,
+            coloraxis_colorbar=dict(
+                title=dict(text=metric_label, font=dict(size=11, color="#475569")),
+                tickfont=dict(size=11, color="#475569"),
+            ),
+        )
         return fig
     except Exception:
         d = state_values.sort_values("value", ascending=True)
-        fig.add_bar(x=d["value"], y=d["state"], orientation="h", marker_color=_PRIMARY)
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=520,
-                          xaxis_title=metric_label,
-                          title="State map unavailable offline — showing ranking")
-        return fig
+        fig.add_bar(
+            x=d["value"], y=d["state"], orientation="h", marker_color=_PRIMARY,
+            texttemplate="%{x:,.0f}", textposition="outside",
+            textfont=dict(size=11, color="#334155"), cliponaxis=False,
+        )
+        fig.update_layout(title=dict(
+            text="State map unavailable offline — showing ranking",
+            font=dict(size=12, color="#64748B"),
+        ))
+        return _apply_jsw_layout(fig, height=520, x_title=metric_label, show_legend=False)
 
 
 def be_trajectory(daily_map: dict[str, float], be_total: float,
@@ -157,18 +227,24 @@ def be_trajectory(daily_map: dict[str, float], be_total: float,
         running += by_day.get(d, 0.0)
         cum.append(running)
     pace = [be_total * d / days_in_month for d in days]
-    fig.add_scatter(x=days, y=cum, mode="lines+markers", name="Cumulative invoiced",
-                    line=dict(color="#10B981", width=2))
-    fig.add_scatter(x=days, y=pace, mode="lines", name="BE pace",
-                    line=dict(color=_PRIMARY2, width=2, dash="dash"))
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=300,
-                      xaxis_title=f"Day of {month_label}", yaxis_title="MT",
-                      legend=dict(orientation="h", y=-0.2), hovermode="x unified")
-    return fig
+    fig.add_scatter(
+        x=days, y=cum, mode="lines+markers", name="Cumulative invoiced",
+        line=dict(color="#10B981", width=2.5), marker=dict(size=6),
+        fill="tozeroy", fillcolor="rgba(16,185,129,.10)",
+    )
+    fig.add_scatter(
+        x=days, y=pace, mode="lines", name="BE pace",
+        line=dict(color="#94A3B8", width=2, dash="dash"),
+    )
+    fig.update_layout(hovermode="x unified")
+    return _apply_jsw_layout(fig, x_title=f"Day of {month_label}", y_title="MT")
 
 
 def _empty(fig: go.Figure, msg: str) -> go.Figure:
-    fig.add_annotation(text=msg, showarrow=False, font=dict(size=13, color="#64748B"))
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=300,
-                      xaxis=dict(visible=False), yaxis=dict(visible=False))
-    return fig
+    fig.add_annotation(
+        text=msg, showarrow=False,
+        font=dict(family=_FONT_FAMILY, size=13, color="#94A3B8"),
+    )
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    return _apply_jsw_layout(fig, show_legend=False)
