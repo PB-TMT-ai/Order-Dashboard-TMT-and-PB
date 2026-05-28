@@ -249,6 +249,15 @@ def enrich(order_df: pd.DataFrame, inv_index: dict[str, InvoiceEntry],
     """
     if not isinstance(order_df, pd.DataFrame):
         order_df = pd.DataFrame(order_df)
+    # Drop padding rows where Order ID is blank or a literal zero — some source
+    # workbooks pad to a fixed row count with `0` in every cell, which would
+    # otherwise inflate line-item counts (12k+ phantom rows) without affecting
+    # MT totals.
+    if K["oid"] in order_df.columns:
+        oid_raw = order_df[K["oid"]].astype(str).str.strip()
+        keep = ~oid_raw.isin(["", "0", "0.0", "nan", "NaT", "None"])
+        if not keep.all():
+            order_df = order_df.loc[keep].reset_index(drop=True)
     if today is None:
         today = datetime.now()
     today = today.replace(hour=0, minute=0, second=0, microsecond=0)
