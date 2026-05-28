@@ -15,8 +15,10 @@ import streamlit as st
 
 import be_logic
 import data
+import drawer
 import plots
 import storage_io as storage
+import theme  # noqa: F401 — registers the JSW Plotly template
 
 st.set_page_config(page_title="JSW One — Order Intelligence", layout="wide")
 
@@ -109,11 +111,27 @@ if "be_restore_tried" not in st.session_state:
     st.session_state.be_restore_tried = False
 
 
-def restore_be():
-    """Reconstruct the last-saved BE version from cloud storage, or None."""
-    meta = storage.load_be_meta()
-    be_bytes = storage.load_be_file()
-    if not meta or not be_bytes or not meta.get("sheet") or not meta.get("month"):
+def restore_be(month: str | None = None, week: str | None = None):
+    """Reconstruct a saved BE version from cloud storage.
+
+    If month+week given, load that exact slot. Otherwise pick the latest
+    versioned slot (latest week of latest month), then fall back to the
+    legacy single-slot file.
+    """
+    if month and week:
+        be_bytes, meta = storage.load_be_version(month, week)
+        meta = meta or {}
+    else:
+        latest = storage.latest_be_version()
+        if latest:
+            be_bytes, meta = storage.load_be_version(latest["month"], latest["week"])
+            meta = meta or {"sheet": latest.get("sheet"), "month": latest["month"],
+                            "week": latest["week"], "uploaded": latest.get("uploaded", "")}
+        else:
+            # Legacy single-BE fallback
+            be_bytes = storage.load_be_file()
+            meta = storage.load_be_meta() or {}
+    if not be_bytes or not meta.get("sheet") or not meta.get("month"):
         return None
     rows = parse_be(be_bytes, meta["sheet"])
     if not rows:
@@ -268,21 +286,21 @@ _KPI_CSS = """
     gap:12px;margin-bottom:12px}
 .kc{background:#fff;border-radius:10px;padding:14px 16px;
     box-shadow:0 2px 8px rgba(15,23,42,.06);
-    border-top:3px solid #1B3A6B;border-left:4px solid transparent;
+    border-top:3px solid #002E5D;border-left:4px solid transparent;
     transition:transform .15s ease, box-shadow .15s ease}
 .kc:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(15,23,42,.08)}
-.kc.k-or{border-left-color:#6366F1}
+.kc.k-or{border-left-color:#002E5D}
 .kc.k-re{border-left-color:#F59E0B}
 .kc.k-in{border-left-color:#10B981}
 .kc.k-inp{border-left-color:#0EA5E9}
-.kc.k-gap{border-left-color:#8B5CF6}
+.kc.k-gap{border-left-color:#ED1C24}
 .kl{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;
     letter-spacing:.5px;margin-bottom:4px}
 .kgaplbl{font-weight:400;color:#94A3B8;font-size:10px;text-transform:none;
     letter-spacing:0}
 .kv{font-size:28px;font-weight:700;line-height:1.1;color:#0F172A;
     font-variant-numeric:tabular-nums}
-.kv.dn{color:#DC2626}.kv.up{color:#059669}
+.kv.dn{color:#ED1C24}.kv.up{color:#059669}
 .ku{font-size:10px;font-weight:500;color:#94A3B8;margin-left:3px}
 .ks{font-size:11px;color:#64748B;margin-top:4px}
 .ch-subs{margin-top:6px;border-top:1px dashed #E2E8F0;padding-top:6px}
@@ -294,7 +312,7 @@ _KPI_CSS = """
     font-size:11px;color:#64748B;box-shadow:0 1px 3px rgba(15,23,42,.05);
     transition:background .15s ease,border-color .15s ease}
 .ic:hover{background:#F1F5F9;border-color:#94A3B8}
-.iv{font-weight:700;font-size:14px;color:#1B3A6B;display:block;margin-bottom:1px;
+.iv{font-weight:700;font-size:14px;color:#002E5D;display:block;margin-bottom:1px;
     font-variant-numeric:tabular-nums}
 </style>
 """
@@ -401,12 +419,11 @@ tab_ov, tab_be, tab_dr, tab_oh, tab_cp, tab_sc, tab_ln = st.tabs(
      "Period compare", "Scheme analysis", "Line items"])
 
 with tab_ov:
-    c1, c2 = st.columns([3, 1])
-    gran = c1.radio("Granularity", ["day", "week", "month", "year"], index=2,
+    gran = st.radio("Granularity", ["day", "week", "month", "year"], index=2,
                     horizontal=True, key="gran")
-    ctype = c2.radio("Chart", ["line", "bar"], horizontal=True, key="ctype")
     st.subheader("Order trend by channel")
-    st.plotly_chart(plots.channel_trend(filtered, gran, ctype), use_container_width=True)
+    st.caption("Click a legend entry to isolate that line; double-click to restore all.")
+    st.plotly_chart(plots.channel_trend(filtered, gran), use_container_width=True)
 
     g1, g2 = st.columns(2)
     with g1:
@@ -437,7 +454,26 @@ with tab_ov:
 
 with tab_be:
     st.subheader("Vs Best Estimate")
-    with st.expander("Load / replace BE file", expanded=be is None):
+
+    # ── BE version picker (latest of latest by default) ─────────────────────
+    def _be_slot(b: be_logic.BeVersion | None) -> tuple[str, str] | None:
+        if b is None:
+            return None
+        return (f"{b.month_y:04d}-{b.month_m + 1:02d}", b.week or "")
+
+    versions = storage.list_be_versions() if storage.is_configured() else []
+    if versions:
+        v_labels = [f"{v['month']} · {v['week']}" for v in versions]
+        sel = st.selectbox(
+            "Active BE version", v_labels, index=0, key="be_version_picker",
+            help="Switch between saved BE versions for any month/week.")
+        sel_v = versions[v_labels.index(sel)]
+        if _be_slot(be) != (sel_v["month"], sel_v["week"]):
+            with st.spinner("Loading BE…"):
+                st.session_state.be_version = restore_be(sel_v["month"], sel_v["week"])
+            st.rerun()
+
+    with st.expander("Upload new BE", expanded=be is None):
         be_up = st.file_uploader("BE Excel", type=["xlsx", "xls"], key="be_upload")
         if be_up is not None:
             be_bytes = be_up.getvalue()
@@ -445,10 +481,17 @@ with tab_be:
             prio = [s for s in sheets if any(t in s.lower() for t in ("distributor be", "be week"))]
             ordered = prio + [s for s in sheets if s not in prio]
             sheet = st.selectbox("BE sheet", ordered)
-            month_val = st.text_input("BE for month (YYYY-MM)",
-                                      value=datetime.now().strftime("%Y-%m"))
-            week = st.text_input("Week label (optional)", value="")
-            if st.button("Load BE"):
+            c_m, c_w = st.columns(2)
+            month_val = c_m.text_input("BE for month (YYYY-MM)",
+                                       value=datetime.now().strftime("%Y-%m"))
+            week_val = c_w.selectbox("Week", ["W1", "W2", "W3", "W4"], index=0,
+                                     help="Up to 4 BE versions per month.")
+            exists = (storage.is_configured()
+                      and storage.be_version_exists(month_val, week_val))
+            if exists:
+                st.warning(f"⚠️ A BE for **{month_val} · {week_val}** already exists. "
+                           "Loading will **overwrite** it.")
+            if st.button("Load BE", type="primary"):
                 rows = parse_be(be_bytes, sheet)
                 if not rows:
                     st.error("Could not extract any BE rows from this sheet.")
@@ -457,15 +500,15 @@ with tab_be:
                     total = sum(r["total"] for r in rows)
                     st.session_state.be_version = be_logic.BeVersion(
                         upload_date=datetime.now().isoformat(), month_label=label,
-                        month_y=y, month_m=m0, week=week.strip(), sheet=sheet,
+                        month_y=y, month_m=m0, week=week_val, sheet=sheet,
                         rows=rows, total_be=total)
                     if storage.is_configured():
-                        storage.save_be_file(be_bytes)
-                        storage.save_be_meta({
-                            "sheet": sheet, "month": month_val, "week": week.strip(),
+                        storage.save_be_version(month_val, week_val, be_bytes, {
+                            "sheet": sheet, "month": month_val, "week": week_val,
                             "uploaded": datetime.now().isoformat()})
-                    st.success(f"BE loaded: {label} · {len({r['distNorm'] for r in rows})} "
-                               f"distributors · {data.fmt(total)} MT")
+                    st.success(f"BE loaded: {label} · {week_val} · "
+                               f"{len({r['distNorm'] for r in rows})} distributors · "
+                               f"{data.fmt(total)} MT")
                     st.rerun()
 
     if ag is None:
@@ -527,3 +570,7 @@ with tab_ln:
     st.download_button("⇩ CSV", view.to_csv(index=False).encode("utf-8"),
                        file_name="line_items.csv", mime="text/csv")
     st.dataframe(view, use_container_width=True, hide_index=True, height=520)
+
+
+# ─── Universal drill-down drawer (rendered last so it floats above) ──────────
+drawer.render()

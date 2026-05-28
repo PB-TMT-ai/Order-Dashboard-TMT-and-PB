@@ -21,8 +21,11 @@ load_dotenv()
 # Processed (Parquet) — small, fast, what the dashboard actually consumes.
 PROCESSED_ORDERS_FILE = "processed_orders.parquet"
 PROCESSED_INVOICES_FILE = "processed_invoices.parquet"
+# Legacy single-BE slot (still read for backward compat).
 BE_FILE = "latest_be.xlsx"
 BE_META_FILE = "latest_be_meta.json"
+# Versioned BE slots — one per (month, week). Up to 4 weeks per month.
+BE_VERSION_PREFIX = "be_versions/"
 
 _client = None
 _last_error: str | None = None
@@ -240,3 +243,97 @@ def load_be_meta() -> dict | None:
         return json.loads(raw)
     except Exception:  # noqa: BLE001
         return None
+
+
+# ─── Versioned BE storage (multi-week per month) ─────────────────────────────
+def _be_version_key(month: str, week: str) -> str:
+    """Object key for a (month, week) slot. month=YYYY-MM, week=W1..W4."""
+    return f"{BE_VERSION_PREFIX}{month}_{week}.xlsx"
+
+
+def _be_version_meta_key(month: str, week: str) -> str:
+    return f"{BE_VERSION_PREFIX}{month}_{week}_meta.json"
+
+
+def be_version_exists(month: str, week: str) -> bool:
+    """True if a (month, week) BE slot is already stored."""
+    global _last_error
+    client = _get_client()
+    if client is None:
+        return False
+    try:
+        client.head_object(Bucket=bucket(), Key=_be_version_key(month, week))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def save_be_version(month: str, week: str, data_bytes: bytes,
+                    meta: dict) -> bool:
+    """Persist a versioned BE file + its meta JSON. Returns True on success."""
+    ok = upload_bytes(_be_version_key(month, week), data_bytes)
+    if ok:
+        ok = upload_bytes(_be_version_meta_key(month, week),
+                          json.dumps(meta).encode("utf-8"))
+    return ok
+
+
+def load_be_version(month: str, week: str) -> tuple[bytes | None, dict | None]:
+    """Return (file_bytes, meta) for a (month, week) slot, or (None, None)."""
+    data_b = download_bytes(_be_version_key(month, week))
+    if not data_b:
+        return None, None
+    raw = download_bytes(_be_version_meta_key(month, week))
+    try:
+        meta = json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001
+        meta = None
+    return data_b, meta
+
+
+def list_be_versions() -> list[dict]:
+    """List every stored (month, week) BE slot.
+
+    Returns a list of {"month": "YYYY-MM", "week": "W1", "sheet": str,
+    "uploaded": iso, "key": object_key}, sorted by (month desc, week desc).
+    """
+    global _last_error
+    client = _get_client()
+    if client is None:
+        return []
+    try:
+        resp = client.list_objects_v2(Bucket=bucket(), Prefix=BE_VERSION_PREFIX)
+    except Exception as exc:  # noqa: BLE001
+        _last_error = _err(exc)
+        return []
+    items = resp.get("Contents", []) or []
+    versions: list[dict] = []
+    for it in items:
+        key = it["Key"]
+        if not key.endswith("_meta.json"):
+            continue
+        # Strip prefix and "_meta.json" -> e.g. "2026-05_W3"
+        slot = key[len(BE_VERSION_PREFIX):-len("_meta.json")]
+        if "_W" not in slot:
+            continue
+        month, week = slot.rsplit("_", 1)
+        meta_raw = download_bytes(key)
+        meta = {}
+        try:
+            meta = json.loads(meta_raw) if meta_raw else {}
+        except Exception:  # noqa: BLE001
+            pass
+        versions.append({
+            "month": month, "week": week,
+            "sheet": meta.get("sheet", ""),
+            "uploaded": meta.get("uploaded", ""),
+            "key": _be_version_key(month, week),
+        })
+    versions.sort(key=lambda v: (v["month"], v["week"]), reverse=True)
+    return versions
+
+
+def latest_be_version() -> dict | None:
+    """Latest week of the latest month. None if no versions stored."""
+    vs = list_be_versions()
+    return vs[0] if vs else None
