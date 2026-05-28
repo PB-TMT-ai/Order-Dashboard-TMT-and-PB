@@ -37,25 +37,39 @@ _ORDER_COLS = set(data.K.values())
 _INVOICE_COLS = {"Order ID", "Invoice date", "Invoiced qty", "Invoice number"}
 
 
+def _norm_col(s: str) -> str:
+    """Normalise an Excel column header for tolerant matching."""
+    return " ".join(str(s).strip().lower().split())
+
+
+def _read_canonical(xls, sheet: str, wanted: set[str]) -> pd.DataFrame:
+    """Read a sheet, keep only the wanted columns (case/space-insensitive match),
+    and rename them back to the canonical names the data layer expects.
+    """
+    wanted_by_norm = {_norm_col(c): c for c in wanted}
+    df = pd.read_excel(xls, sheet_name=sheet,
+                       usecols=lambda c: _norm_col(c) in wanted_by_norm)
+    return df.rename(columns={c: wanted_by_norm[_norm_col(c)] for c in df.columns})
+
+
 def parse_order_workbook(file_bytes: bytes):
     """Read the Order + Invoice sheets and return (enriched_df, inv_index).
 
-    Only the columns the dashboard actually uses are read — large exports often
-    carry 100+ columns, and dropping the rest keeps memory in check.
+    Column names are matched case- and space-insensitively (so e.g.
+    "Opportunity Date" vs "Opportunity date" still resolves), and only the
+    columns the dashboard uses are loaded to keep memory in check.
     """
     xls = _excel_file(file_bytes)
     inv_index = {}
     inv_sheet = next((s for s in xls.sheet_names if s.lower() == "invoice"), None) \
         or next((s for s in xls.sheet_names if "invoice" in s.lower()), None)
     if inv_sheet:
-        inv_df = pd.read_excel(xls, sheet_name=inv_sheet,
-                               usecols=lambda c: c in _INVOICE_COLS)
+        inv_df = _read_canonical(xls, inv_sheet, _INVOICE_COLS)
         inv_index = data.build_invoice_index(inv_df)
         del inv_df
 
     order_sheet = next((s for s in xls.sheet_names if "order" in s.lower()), xls.sheet_names[0])
-    order_df = pd.read_excel(xls, sheet_name=order_sheet,
-                             usecols=lambda c: c in _ORDER_COLS)
+    order_df = _read_canonical(xls, order_sheet, _ORDER_COLS)
     enriched = data.enrich(order_df, inv_index)
     del order_df
     return enriched, inv_index
