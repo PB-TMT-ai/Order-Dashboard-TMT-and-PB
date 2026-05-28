@@ -103,6 +103,13 @@ def top_distributors(df: pd.DataFrame, n: int = 10) -> go.Figure:
     return _hbar(agg, "_dn", "_q", "Ordered MT", RANKING_DIST)
 
 
+def top_ranking(top_df: pd.DataFrame, label_col: str = "state",
+                value_col: str = "value", color: str = RANKING_STATES,
+                title: str = "Ordered MT") -> go.Figure:
+    """Render a pre-aggregated top-N (label, value) df as a horizontal bar."""
+    return _hbar(top_df, label_col, value_col, title, color)
+
+
 def _pie(df: pd.DataFrame, label_col: str, value_col: str, n: int = 10) -> go.Figure:
     fig = go.Figure()
     if not len(df):

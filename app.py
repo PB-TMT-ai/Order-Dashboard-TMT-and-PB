@@ -383,6 +383,72 @@ else:
 st.markdown(_KPI_CSS + '<div class="kpi-row">' + "".join(cards) + "</div>",
             unsafe_allow_html=True)
 
+
+# ─── KPI drill-down buttons (open the right-side drawer) ─────────────────────
+def _kpi_view(rows: pd.DataFrame, extra_cols: list[str] | None = None) -> pd.DataFrame:
+    """Standardised line-items view used by every drawer on this page."""
+    cols = ["_d", "_oid", "_dn", "_pt", "_sta", "_st", "_gr", "_dia",
+            "_q", "_rq", "_iq", "_cm"] + (extra_cols or [])
+    return rows[cols].rename(columns={
+        "_d": "Date", "_oid": "Order ID", "_dn": "Distributor", "_pt": "Type",
+        "_sta": "Status", "_st": "Ship to", "_gr": "Grade", "_dia": "Dia",
+        "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM"})
+
+
+_kpi_btn_cols = st.columns(5)
+if _kpi_btn_cols[0].button("🔍 Ordered detail", key="kpi_or",
+                           use_container_width=True):
+    drawer.open_drawer(
+        "Ordered — line items", _kpi_view(filtered),
+        subtitle=f"{len(filtered):,} rows · {data.fmt(kpis.ordered)} MT",
+        summary=[("Ordered", data.fmt(kpis.ordered)),
+                 ("Released", data.fmt(kpis.released)),
+                 ("Invoiced", data.fmt(kpis.invoiced)),
+                 ("Lines", f"{len(filtered):,}")],
+        filename="ordered_lines.csv")
+if _kpi_btn_cols[1].button("🔍 Released detail", key="kpi_re",
+                           use_container_width=True):
+    sub = filtered[filtered["_rq"] > 0]
+    drawer.open_drawer(
+        "Released — line items", _kpi_view(sub),
+        subtitle=f"{len(sub):,} rows · {data.fmt(kpis.released)} MT",
+        summary=[("Released", data.fmt(kpis.released)),
+                 ("Lines", f"{len(sub):,}")],
+        filename="released_lines.csv")
+if _kpi_btn_cols[2].button("🔍 Invoiced detail", key="kpi_in",
+                           use_container_width=True):
+    sub = filtered[filtered["_iq"] > 0]
+    drawer.open_drawer(
+        "Invoiced — line items", _kpi_view(sub),
+        subtitle=f"{len(sub):,} rows · {data.fmt(kpis.invoiced)} MT",
+        summary=[("Invoiced", data.fmt(kpis.invoiced)),
+                 ("Lines", f"{len(sub):,}")],
+        filename="invoiced_lines.csv")
+if _kpi_btn_cols[3].button("🔍 Invoiced in period", key="kpi_inp",
+                           use_container_width=True):
+    sub = nd[iip > 0] if len(nd) else filtered[filtered["_iq"] > 0]
+    drawer.open_drawer(
+        "Invoiced in period — line items", _kpi_view(sub),
+        subtitle=(f"{period['label']} · " if period else "All time · ") +
+                 f"{len(sub):,} rows · {data.fmt(inv_in_period)} MT",
+        summary=[("Invoiced in period", data.fmt(inv_in_period)),
+                 ("Lines", f"{len(sub):,}")],
+        filename="invoiced_in_period_lines.csv")
+if _kpi_btn_cols[4].button("🔍 BE gap detail", key="kpi_gap",
+                           use_container_width=True, disabled=ag is None):
+    if ag is not None:
+        be_rows = filtered[filtered["_dnN"].isin(ag.dist_has_be)]
+        drawer.open_drawer(
+            f"BE gap — distributor actuals ({be.month_label})", _kpi_view(be_rows),
+            subtitle=f"BE {data.fmt(ag.tot_be)} · "
+                     f"Inv {data.fmt(ag.matched_act)} · "
+                     f"Gap {data.fmt(ag.matched_act - ag.tot_be)} MT",
+            summary=[("BE", data.fmt(ag.tot_be)),
+                     ("Actuals", data.fmt(ag.matched_act)),
+                     ("Pipeline", data.fmt(ag.matched_pipe)),
+                     ("Distributors", f"{len(ag.atomic):,}")],
+            filename="be_gap_actuals.csv")
+
 # Info bar chips
 st_sum = filtered.groupby("_st")["_q"].sum() if len(filtered) else None
 top_st = st_sum.idxmax() if st_sum is not None and len(st_sum) and st_sum.max() > 0 else None
@@ -411,8 +477,9 @@ st.markdown(
     unsafe_allow_html=True)
 
 
-# ─── Inject card / pill control CSS once for the rest of the page ───────────
+# ─── Inject card / pill / drawer CSS once for the rest of the page ──────────
 st.markdown(theme.CARD_CSS, unsafe_allow_html=True)
+st.markdown(drawer._DRAWER_CSS, unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -488,6 +555,30 @@ with tab_ov:
                         use_container_width=True)
 
     # ── Top 10 ship-to states / Grade mix ───────────────────────────────────
+    def _open_state_drawer(state_name: str) -> None:
+        rows = filtered[filtered["_st"] == state_name]
+        drawer.open_drawer(
+            f"{state_name} — line items", _kpi_view(rows),
+            subtitle=f"Ship-to · {len(rows):,} rows · "
+                     f"{data.fmt(rows['_q'].sum())} MT ordered",
+            summary=[("Ordered", data.fmt(rows["_q"].sum())),
+                     ("Released", data.fmt(rows["_rq"].sum())),
+                     ("Invoiced", data.fmt(rows["_iq"].sum())),
+                     ("Lines", f"{len(rows):,}")],
+            filename=f"{state_name.replace(' ', '_')}_lines.csv")
+
+    def _open_distributor_drawer(dn: str) -> None:
+        rows = filtered[filtered["_dn"] == dn]
+        drawer.open_drawer(
+            f"{dn} — line items", _kpi_view(rows),
+            subtitle=f"{len(rows):,} rows · "
+                     f"{data.fmt(rows['_q'].sum())} MT ordered",
+            summary=[("Ordered", data.fmt(rows["_q"].sum())),
+                     ("Released", data.fmt(rows["_rq"].sum())),
+                     ("Invoiced", data.fmt(rows["_iq"].sum())),
+                     ("Lines", f"{len(rows):,}")],
+            filename=f"{dn.replace(' ', '_')}_lines.csv")
+
     g1, g2 = st.columns(2)
     with g1:
         with st.container(border=True):
@@ -495,10 +586,22 @@ with tab_ov:
                            .sort_values("_q", ascending=False).head(10)
                            .rename(columns={"_st": "Ship-to state",
                                             "_q": "Ordered MT"}))
-            _chart_header("Top 10 ship-to states", "By Ordered MT",
+            _chart_header("Top 10 ship-to states",
+                          "By Ordered MT — click a bar to drill in",
                           csv_df=_states_csv, csv_name="top_states.csv",
                           key="states")
-            st.plotly_chart(plots.top_states(filtered), use_container_width=True)
+            ev = st.plotly_chart(plots.top_states(filtered),
+                                 use_container_width=True,
+                                 on_select="rerun", key="ch_top_states")
+            try:
+                pts = ev.selection.points if ev and ev.selection else []
+            except Exception:  # noqa: BLE001
+                pts = []
+            if pts:
+                picked = pts[0].get("y")
+                if picked and st.session_state.get("_last_st_pick") != picked:
+                    st.session_state["_last_st_pick"] = picked
+                    _open_state_drawer(picked)
     with g2:
         with st.container(border=True):
             _grade_csv = (filtered.groupby("_gr")["_q"].sum().reset_index()
@@ -517,11 +620,22 @@ with tab_ov:
                          .sort_values("_q", ascending=False).head(10)
                          .rename(columns={"_dn": "Distributor",
                                           "_q": "Ordered MT"}))
-            _chart_header("Top 10 distributors", "By Ordered MT",
+            _chart_header("Top 10 distributors",
+                          "By Ordered MT — click a bar to drill in",
                           csv_df=_dist_csv, csv_name="top_distributors.csv",
                           key="dist")
-            st.plotly_chart(plots.top_distributors(filtered),
-                            use_container_width=True)
+            ev = st.plotly_chart(plots.top_distributors(filtered),
+                                 use_container_width=True,
+                                 on_select="rerun", key="ch_top_dist")
+            try:
+                pts = ev.selection.points if ev and ev.selection else []
+            except Exception:  # noqa: BLE001
+                pts = []
+            if pts:
+                picked = pts[0].get("y")
+                if picked and st.session_state.get("_last_dn_pick") != picked:
+                    st.session_state["_last_dn_pick"] = picked
+                    _open_distributor_drawer(picked)
     with g4:
         with st.container(border=True):
             _plant_csv = (filtered.groupby("_cm")["_q"].sum().reset_index()
@@ -533,28 +647,106 @@ with tab_ov:
                           key="plant")
             st.plotly_chart(plots.plant_mix(filtered), use_container_width=True)
 
-    # ── India heat map ──────────────────────────────────────────────────────
+    # ── India heat map + Top-10 sidekick ────────────────────────────────────
+    # Most source workbooks ship state names in uppercase ("UTTAR PRADESH");
+    # the GeoJSON uses proper case ("Uttar Pradesh"). Normalise via title-case
+    # plus a small alias table for the handful that don't match cleanly.
+    _STATE_ALIASES = {
+        # Map our names → the GeoJSON's properties.NAME_1 values
+        "Jammu & Kashmir": "Jammu and Kashmir",
+        "Andaman & Nicobar Islands": "Andaman and Nicobar",
+        "Andaman And Nicobar Islands": "Andaman and Nicobar",
+        "Dadra & Nagar Haveli": "Dadra and Nagar Haveli",
+        "Daman & Diu": "Daman and Diu",
+        "Odisha": "Orissa",
+        "Uttarakhand": "Uttaranchal",
+    }
+
+    def _state_to_geo(s: object) -> str:
+        t = str(s or "").strip().title()
+        # Title-cases lowercase 'and' too — already correct
+        return _STATE_ALIASES.get(t, t)
+
     with st.container(border=True):
-        def _metric_ctrl():
-            return st.radio(" ", ["Ordered MT", "Released MT",
-                                  "Invoiced MT", "Line count"],
-                            index=0, horizontal=True, key="map_metric",
+        def _map_dim_ctrl():
+            return st.radio(" ", ["Ship-to", "Bill-to"], index=0,
+                            horizontal=True, key="map_dim",
                             label_visibility="collapsed")
-        metric_opt = _chart_header(
-            "India heat map — Ship-to state",
-            "Color intensity scales with the selected metric.",
-            csv_df=None, key="map", controls=_metric_ctrl,
-        ) or "Ordered MT"
-        metric_col = {"Ordered MT": "_q", "Released MT": "_rq",
-                      "Invoiced MT": "_iq"}.get(metric_opt)
-        if metric_col:
-            sv = filtered.groupby("_st")[metric_col].sum().reset_index()
-        else:
-            sv = filtered.groupby("_st").size().reset_index(name="value")
-            sv = sv.rename(columns={0: "value"})
-        sv.columns = ["state", "value"]
-        st.plotly_chart(plots.india_map(sv, metric_opt),
-                        use_container_width=True)
+        dim = _chart_header(
+            "India heat map by state",
+            "Color grades by Ordered MT. Click a state to drill into its line items.",
+            csv_df=None, key="map", controls=_map_dim_ctrl,
+        ) or "Ship-to"
+        state_field = "_st" if dim == "Ship-to" else "_bs"
+
+        sv = (filtered.groupby(state_field)["_q"].sum().reset_index()
+              if len(filtered) else
+              pd.DataFrame(columns=[state_field, "_q"]))
+        sv = sv[sv[state_field].astype(str).str.strip() != ""]
+        sv["state"] = sv[state_field].map(_state_to_geo)
+        sv = sv.groupby("state", as_index=False)["_q"].sum()
+        sv = sv.rename(columns={"_q": "value"}).sort_values(
+            "value", ascending=False)
+
+        # Map (left, 3) + Top-10 sidekick (right, 2)
+        m_col, t_col = st.columns([3, 2])
+        with m_col:
+            map_event = st.plotly_chart(
+                plots.india_map(sv[["state", "value"]], "Ordered MT"),
+                use_container_width=True,
+                on_select="rerun", key="map_chart",
+            )
+        with t_col:
+            st.markdown('<div class="chart-title">Top 10 states</div>',
+                        unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="chart-sub">{dim} · Ordered MT</div>',
+                unsafe_allow_html=True)
+            top_df = sv.head(10).reset_index(drop=True)
+            st.plotly_chart(
+                plots.top_ranking(top_df, label_col="state", value_col="value",
+                                  color=theme.RANKING_STATES),
+                use_container_width=True,
+            )
+
+        # Click-state → drawer
+        try:
+            sel = (map_event.selection.points if map_event
+                   and map_event.selection else [])
+        except Exception:  # noqa: BLE001
+            sel = []
+        if sel:
+            picked = sel[0].get("location") or sel[0].get("hovertext")
+            last_key = f"_map_last_{dim}"
+            if picked and st.session_state.get(last_key) != picked:
+                st.session_state[last_key] = picked
+                # Re-filter source rows back from GeoJSON name to raw values
+                if dim == "Ship-to":
+                    mask = filtered["_st"].map(_state_to_geo) == picked
+                else:
+                    mask = filtered["_bs"].map(_state_to_geo) == picked
+                rows = filtered[mask]
+                cols = ["_d", "_oid", "_dn", "_pt", "_sta", "_st", "_gr",
+                        "_dia", "_q", "_rq", "_iq", "_cm"]
+                view = rows[cols].rename(columns={
+                    "_d": "Date", "_oid": "Order ID", "_dn": "Distributor",
+                    "_pt": "Type", "_sta": "Status", "_st": "Ship to",
+                    "_gr": "Grade", "_dia": "Dia", "_q": "Qty MT",
+                    "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM",
+                })
+                drawer.open_drawer(
+                    f"{picked} — line items",
+                    view,
+                    subtitle=f"{dim} state · {len(rows):,} rows · "
+                             f"{data.fmt(rows['_q'].sum())} MT ordered",
+                    summary=[
+                        ("Ordered MT", data.fmt(rows["_q"].sum())),
+                        ("Released MT", data.fmt(rows["_rq"].sum())),
+                        ("Invoiced MT", data.fmt(rows["_iq"].sum())),
+                        ("Line items", f"{len(rows):,}"),
+                    ],
+                    filename=f"{picked.replace(' ', '_')}_lines.csv",
+                )
 
 with tab_be:
     st.subheader("Vs Best Estimate")

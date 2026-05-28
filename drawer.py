@@ -41,16 +41,12 @@ def open_drawer(title: str, df: pd.DataFrame | None = None, *,
                 subtitle: str = "", summary: list[tuple[str, str]] | None = None,
                 filename: str = "drawer_rows.csv",
                 context: dict | None = None) -> None:
-    """Populate and open the drawer.
+    """Populate state, then directly invoke the dialog in the same script run.
 
-    Args:
-      title: header text
-      df: rows to display + export
-      subtitle: small grey caption under title
-      summary: list of (label, value) chips at the top
-      filename: CSV download name
-      context: arbitrary state the consumer wants to thread through (e.g. for
-        the contents to render a chart inside the drawer)
+    Calling `_drawer_dialog()` here (instead of just flipping a flag and
+    running st.rerun()) is what makes Streamlit actually open the modal — a
+    dialog must be invoked during the same script run as the user
+    interaction that triggers it.
     """
     s = _state()
     s.open = True
@@ -60,6 +56,7 @@ def open_drawer(title: str, df: pd.DataFrame | None = None, *,
     s.df = df
     s.filename = filename
     s.context = context or {}
+    _drawer_dialog()
 
 
 def close_drawer() -> None:
@@ -88,29 +85,39 @@ def trigger(label: str, key: str, *, title: str, df: pd.DataFrame | None = None,
 # ─── Universal CSS (injected once) ───────────────────────────────────────────
 _DRAWER_CSS = f"""
 <style>
-.dr-backdrop {{
-  position: fixed; inset: 0; background: rgba(15, 23, 42, 0.32);
-  z-index: 9990; backdrop-filter: blur(2px);
-  animation: dr-fade 180ms ease-out;
+/* Re-style Streamlit's native dialog as a right-side slide-over panel.
+   Streamlit wraps the modal in: [data-testid="stDialog"] > div > [role=dialog] */
+
+/* Right-anchor the inner role=dialog element */
+[data-testid="stDialog"] [role="dialog"] {{
+    position: fixed !important;
+    top: 0 !important; right: 0 !important; left: auto !important;
+    bottom: 0 !important;
+    transform: none !important;
+    height: 100vh !important; max-height: 100vh !important;
+    width: min(640px, 95vw) !important;
+    max-width: 95vw !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    border-left: 4px solid {JSW_NAVY} !important;
+    box-shadow: -10px 0 30px rgba(15,23,42,.18) !important;
+    animation: dr-slide 280ms cubic-bezier(.22,1,.36,1);
+    overflow-y: auto;
 }}
-.dr-panel {{
-  position: fixed; top: 0; right: 0; height: 100vh; width: min(560px, 92vw);
-  background: {CARD_BG}; z-index: 9999;
-  box-shadow: -8px 0 24px rgba(15, 23, 42, 0.18);
-  border-left: 4px solid {JSW_NAVY};
-  display: flex; flex-direction: column;
-  animation: dr-slide 260ms cubic-bezier(.22,1,.36,1);
+/* Also right-anchor the inner wrapper that BaseWeb modal uses */
+[data-testid="stDialog"] > div {{
+    justify-content: flex-end !important;
 }}
-@keyframes dr-slide {{ from {{ transform: translateX(100%); }} to {{ transform: translateX(0); }} }}
-@keyframes dr-fade {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
-.dr-head {{
-  padding: 18px 22px 12px; border-bottom: 1px solid {GRID};
-  background: linear-gradient(180deg, #FAFBFC 0%, {CARD_BG} 100%);
+@keyframes dr-slide {{
+    from {{ transform: translateX(100%); }}
+    to   {{ transform: translateX(0); }}
 }}
-.dr-title {{ font-size: 16px; font-weight: 700; color: {INK}; line-height: 1.3; }}
-.dr-sub {{ font-size: 12px; color: {MUTED_TEXT}; margin-top: 4px; }}
+/* Hide BaseWeb's default header (it shows 'Detail' from @st.dialog) */
+[data-testid="stDialog"] [role="dialog"] > div:first-child {{
+    display: none !important;
+}}
 .dr-summary {{
-  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 14px;
 }}
 .dr-chip {{
   background: #F1F5F9; border-radius: 6px; padding: 6px 10px;
@@ -120,24 +127,6 @@ _DRAWER_CSS = f"""
               font-weight: 700; margin-top: 1px; }}
 </style>
 """
-
-
-def render() -> None:
-    """Render the global drawer (call once at the bottom of every page)."""
-    s = _state()
-    if not s.open:
-        return
-
-    st.markdown(_DRAWER_CSS, unsafe_allow_html=True)
-    st.markdown('<div class="dr-backdrop"></div>', unsafe_allow_html=True)
-
-    # Native Streamlit dialog (right-side panel via CSS overrides). We use
-    # st.dialog when available (Streamlit ≥ 1.32); fall back to expander.
-    has_dialog = hasattr(st, "dialog")
-    if has_dialog:
-        _render_dialog()
-    else:
-        _render_fallback()
 
 
 def _summary_html(s: DrawerState) -> str:
@@ -150,47 +139,40 @@ def _summary_html(s: DrawerState) -> str:
     return f'<div class="dr-summary">{chips}</div>'
 
 
-def _render_dialog() -> None:
+# Module-level dialog function — Streamlit's @st.dialog requires that.
+# The actual title is rendered as an H3 inside the body so it can be dynamic.
+@st.dialog("Detail", width="large")
+def _drawer_dialog() -> None:
     s = _state()
-
-    @st.dialog(s.title, width="large")
-    def _dlg() -> None:
-        if s.subtitle:
-            st.caption(s.subtitle)
-        if s.summary:
-            st.markdown(_DRAWER_CSS + _summary_html(s), unsafe_allow_html=True)
-        if s.df is not None and len(s.df):
+    st.markdown(_DRAWER_CSS, unsafe_allow_html=True)
+    if s.title:
+        st.markdown(
+            f'<div style="font-size:18px;font-weight:700;color:#0F172A;'
+            f'margin:-12px 0 4px;">{s.title}</div>',
+            unsafe_allow_html=True)
+    if s.subtitle:
+        st.caption(s.subtitle)
+    if s.summary:
+        st.markdown(_summary_html(s), unsafe_allow_html=True)
+    if s.df is not None and len(s.df):
+        c1, c2 = st.columns([1, 4])
+        with c1:
             st.download_button(
-                "⇩ Download CSV", s.df.to_csv(index=False).encode("utf-8"),
+                "⇩ CSV", s.df.to_csv(index=False).encode("utf-8"),
                 file_name=s.filename, mime="text/csv",
-                key=f"dr_dl_{s.title}",
-            )
-            st.dataframe(s.df, use_container_width=True, hide_index=True,
-                         height=420)
-        elif s.df is not None:
-            st.info("No rows.")
-        c1, _ = st.columns([1, 4])
-        if c1.button("Close", key="dr_close", type="primary"):
-            close_drawer()
-            st.rerun()
-
-    _dlg()
+                key="dr_dl", use_container_width=True)
+        st.dataframe(s.df, use_container_width=True, hide_index=True,
+                     height=460)
+    elif s.df is not None:
+        st.info("No rows match.")
+    if st.button("Close", key="dr_close", type="primary"):
+        close_drawer()
+        st.rerun()
 
 
-def _render_fallback() -> None:
+def render() -> None:
+    """Render the global drawer (call once at the bottom of every page)."""
     s = _state()
-    with st.expander(s.title, expanded=True):
-        if s.subtitle:
-            st.caption(s.subtitle)
-        if s.summary:
-            st.markdown(_summary_html(s), unsafe_allow_html=True)
-        if s.df is not None and len(s.df):
-            st.download_button(
-                "⇩ Download CSV", s.df.to_csv(index=False).encode("utf-8"),
-                file_name=s.filename, mime="text/csv",
-                key=f"dr_dl_fb_{s.title}",
-            )
-            st.dataframe(s.df, use_container_width=True, hide_index=True)
-        if st.button("Close", key="dr_close_fb"):
-            close_drawer()
-            st.rerun()
+    if not s.open:
+        return
+    _drawer_dialog()
