@@ -53,26 +53,30 @@ def _read_canonical(xls, sheet: str, wanted: set[str]) -> pd.DataFrame:
 
 
 def parse_order_workbook(file_bytes: bytes):
-    """Read the Order + Invoice sheets and return (enriched_df, inv_index).
+    """Parse the Excel and return (enriched_df, inv_index, raw_invoice_df).
+
+    The raw invoice DataFrame is returned so it can be persisted alongside the
+    enriched orders as Parquet — keeping enough state to rebuild inv_index on
+    later sessions without re-parsing the Excel.
 
     Column names are matched case- and space-insensitively (so e.g.
-    "Opportunity Date" vs "Opportunity date" still resolves), and only the
-    columns the dashboard uses are loaded to keep memory in check.
+    "Opportunity Date" vs "Opportunity date" resolves), and only the columns
+    the dashboard uses are loaded to keep memory in check.
     """
     xls = _excel_file(file_bytes)
     inv_index = {}
+    inv_df = None
     inv_sheet = next((s for s in xls.sheet_names if s.lower() == "invoice"), None) \
         or next((s for s in xls.sheet_names if "invoice" in s.lower()), None)
     if inv_sheet:
         inv_df = _read_canonical(xls, inv_sheet, _INVOICE_COLS)
         inv_index = data.build_invoice_index(inv_df)
-        del inv_df
 
     order_sheet = next((s for s in xls.sheet_names if "order" in s.lower()), xls.sheet_names[0])
     order_df = _read_canonical(xls, order_sheet, _ORDER_COLS)
     enriched = data.enrich(order_df, inv_index)
     del order_df
-    return enriched, inv_index
+    return enriched, inv_index, inv_df
 
 
 @st.cache_data(show_spinner="Reading BE sheet names...")
@@ -133,23 +137,29 @@ def get_data():
         h = hashlib.md5(file_bytes).hexdigest()
         if st.session_state.get("order_hash") != h:
             with st.spinner("Parsing order file…"):
-                st.session_state.order_data = parse_order_workbook(file_bytes)
+                enriched, inv_index, inv_df = parse_order_workbook(file_bytes)
+            st.session_state.order_data = (enriched, inv_index)
             st.session_state.order_hash = h
             st.session_state.order_size = len(file_bytes)
             if storage.is_configured():
-                with st.spinner("Saving to cloud storage…"):
-                    ok = storage.save_order_file(file_bytes)
+                with st.spinner("Saving processed data to cloud storage…"):
+                    ok = storage.save_processed(enriched, inv_df)
                 st.session_state.order_saved = ok
                 st.session_state.order_save_err = None if ok else storage.last_error()
         return st.session_state.order_data
 
-    # No file in the uploader: load the saved copy from storage once per session.
+    # No file in the uploader: load the saved processed copy from storage.
+    # Parquet is tiny + fast — no Excel re-parsing, no OOM risk.
     if "order_data" not in st.session_state:
-        cached = storage.load_order_file() if storage.is_configured() else None
-        if cached:
-            with st.spinner("Loading saved order file…"):
-                st.session_state.order_data = parse_order_workbook(cached)
-            st.session_state.order_hash = hashlib.md5(cached).hexdigest()
+        if storage.is_configured():
+            with st.spinner("Loading saved data…"):
+                orders, invoices = storage.load_processed()
+        else:
+            orders, invoices = None, None
+        if orders is not None and len(orders):
+            inv_index = data.build_invoice_index(invoices) if invoices is not None \
+                else {}
+            st.session_state.order_data = (orders, inv_index)
         else:
             st.session_state.order_data = (None, None)
     return st.session_state.order_data

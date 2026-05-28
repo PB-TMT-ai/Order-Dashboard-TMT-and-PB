@@ -313,8 +313,12 @@ def enrich(order_df: pd.DataFrame, inv_index: dict[str, InvoiceEntry],
 
     # Invoice context (per order id)
     tot_inv = oid.map(lambda o: inv_index[o].total_qty if o in inv_index else 0.0)
-    last_d = oid.map(lambda o: inv_index[o].last_date if o in inv_index else None)
-    first_d = oid.map(lambda o: inv_index[o].first_date if o in inv_index else None)
+    last_d = pd.to_datetime(
+        oid.map(lambda o: inv_index[o].last_date if o in inv_index else None),
+        errors="coerce")
+    first_d = pd.to_datetime(
+        oid.map(lambda o: inv_index[o].first_date if o in inv_index else None),
+        errors="coerce")
 
     return pd.DataFrame({
         "_d": dt.to_numpy(), "_q": q.values, "_rq": rq.values, "_iq": iq.values,
@@ -332,8 +336,8 @@ def enrich(order_df: pd.DataFrame, inv_index: dict[str, InvoiceEntry],
         "_sf": _cl_series(_col(order_df, "sfs")).values, "_bs": bs.values,
         "_sta": sta.values, "_ot": ot.values, "_oid": oid.values, "_ch": ch,
         "_pendOrig": raw_pend, "_pend": pend, "_scShort": sc_short,
-        "_pendInv": pend_inv, "_invDateLast": _to_obj_dates(last_d),
-        "_invDateFirst": _to_obj_dates(first_d), "_orderTotInv": tot_inv.values,
+        "_pendInv": pend_inv, "_invDateLast": last_d.to_numpy(),
+        "_invDateFirst": first_d.to_numpy(), "_orderTotInv": tot_inv.values,
     })
 
 

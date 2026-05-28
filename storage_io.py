@@ -9,14 +9,18 @@ runs, it just won't persist files between sessions. Errors are captured in
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
 
-ORDER_FILE = "latest_order.xlsx"
+# Processed (Parquet) — small, fast, what the dashboard actually consumes.
+PROCESSED_ORDERS_FILE = "processed_orders.parquet"
+PROCESSED_INVOICES_FILE = "processed_invoices.parquet"
 BE_FILE = "latest_be.xlsx"
 BE_META_FILE = "latest_be_meta.json"
 
@@ -152,8 +156,37 @@ def download_bytes(name: str) -> bytes | None:
         return None
 
 
-def save_order_file(data: bytes) -> bool:
-    return upload_bytes(ORDER_FILE, data)
+def _df_to_parquet_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    df.to_parquet(buf, engine="pyarrow", compression="snappy", index=False)
+    return buf.getvalue()
+
+
+def _parquet_bytes_to_df(b: bytes) -> pd.DataFrame:
+    return pd.read_parquet(io.BytesIO(b), engine="pyarrow")
+
+
+def save_processed(orders_df: pd.DataFrame, invoices_df: pd.DataFrame | None) -> bool:
+    """Persist the processed order frame + raw invoice lines as compact Parquet.
+
+    Replaces the older approach of saving the full raw Excel — those files
+    were too large to load on Streamlit Cloud's RAM. Parquet keeps only what
+    the dashboard needs, in a columnar/compressed format.
+    """
+    ok = upload_bytes(PROCESSED_ORDERS_FILE, _df_to_parquet_bytes(orders_df))
+    if invoices_df is not None and len(invoices_df):
+        ok = upload_bytes(PROCESSED_INVOICES_FILE, _df_to_parquet_bytes(invoices_df)) and ok
+    return ok
+
+
+def load_processed() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    orders_b = download_bytes(PROCESSED_ORDERS_FILE)
+    if not orders_b:
+        return None, None
+    orders = _parquet_bytes_to_df(orders_b)
+    inv_b = download_bytes(PROCESSED_INVOICES_FILE)
+    invoices = _parquet_bytes_to_df(inv_b) if inv_b else None
+    return orders, invoices
 
 
 def save_be_file(data: bytes) -> bool:
@@ -162,10 +195,6 @@ def save_be_file(data: bytes) -> bool:
 
 def save_be_meta(meta: dict) -> bool:
     return upload_bytes(BE_META_FILE, json.dumps(meta).encode("utf-8"))
-
-
-def load_order_file() -> bytes | None:
-    return download_bytes(ORDER_FILE)
 
 
 def load_be_file() -> bytes | None:
