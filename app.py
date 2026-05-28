@@ -429,9 +429,9 @@ def _chart_header(title: str, subtitle: str, *, csv_df: pd.DataFrame | None = No
     has_ctrl = controls is not None
     has_csv = csv_df is not None
     if has_ctrl and has_csv:
-        ratios = [5, 1, 2]
+        ratios = [4, 1, 3]
     elif has_csv or has_ctrl:
-        ratios = [6, 1] if has_csv else [4, 2]
+        ratios = [6, 1] if has_csv else [3, 3]
     else:
         ratios = [1]
     cols = st.columns(ratios)
