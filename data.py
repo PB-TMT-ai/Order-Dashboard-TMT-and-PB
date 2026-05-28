@@ -185,17 +185,19 @@ def _num_series(s: pd.Series) -> pd.Series:
 
 
 def _date_series(s: pd.Series) -> pd.Series:
-    """Vectorised parse_date(): returns a datetime64 Series (NaT for missing)."""
+    """Vectorised parse_date(): returns a datetime64 Series (NaT for missing).
+
+    Uses per-value inference (`format="mixed"`) with day-first preference
+    (matches Indian D-M-Y data). Without `format="mixed"`, pandas locks onto a
+    single inferred format from the bulk of values and silently coerces every
+    differently-formatted row to NaT — which previously made rows with
+    "28-4-25" disappear when most rows were ISO.
+    """
     if pd.api.types.is_datetime64_any_dtype(s):
         return s
     txt = s.astype(str).str.strip()
     txt = txt.where(~txt.isin(["", "nan", "NaT", "0", "None"]), other=None)
-    out = pd.to_datetime(txt, errors="coerce")
-    missing = out.isna() & txt.notna()
-    if missing.any():  # fall back to day-first (d/m/y) parsing
-        out = out.copy()
-        out[missing] = pd.to_datetime(txt[missing], errors="coerce", dayfirst=True)
-    return out
+    return pd.to_datetime(txt, errors="coerce", format="mixed", dayfirst=True)
 
 
 def _cl_series(s: pd.Series) -> pd.Series:
