@@ -485,6 +485,25 @@ st.markdown(drawer._DRAWER_CSS, unsafe_allow_html=True)
 # --------------------------------------------------------------------------- #
 # Chart-card helper
 # --------------------------------------------------------------------------- #
+# Map our state names to whatever the choropleth GeoJSON uses for NAME_1.
+# Ship-to is uppercase ("UTTAR PRADESH"); Bill-to is proper-cased via SC_;
+# the GeoJSON uses proper case plus a handful of legacy spellings.
+_STATE_ALIASES = {
+    "Jammu & Kashmir": "Jammu and Kashmir",
+    "Andaman & Nicobar Islands": "Andaman and Nicobar",
+    "Andaman And Nicobar Islands": "Andaman and Nicobar",
+    "Dadra & Nagar Haveli": "Dadra and Nagar Haveli",
+    "Daman & Diu": "Daman and Diu",
+    "Odisha": "Orissa",
+    "Uttarakhand": "Uttaranchal",
+}
+
+
+def _state_to_geo(s: object) -> str:
+    t = str(s or "").strip().title()
+    return _STATE_ALIASES.get(t, t)
+
+
 def _chart_header(title: str, subtitle: str, *, csv_df: pd.DataFrame | None = None,
                   csv_name: str = "data.csv", key: str = "",
                   controls=None) -> object | None:
@@ -648,25 +667,6 @@ with tab_ov:
             st.plotly_chart(plots.plant_mix(filtered), use_container_width=True)
 
     # ── India heat map + Top-10 sidekick ────────────────────────────────────
-    # Most source workbooks ship state names in uppercase ("UTTAR PRADESH");
-    # the GeoJSON uses proper case ("Uttar Pradesh"). Normalise via title-case
-    # plus a small alias table for the handful that don't match cleanly.
-    _STATE_ALIASES = {
-        # Map our names → the GeoJSON's properties.NAME_1 values
-        "Jammu & Kashmir": "Jammu and Kashmir",
-        "Andaman & Nicobar Islands": "Andaman and Nicobar",
-        "Andaman And Nicobar Islands": "Andaman and Nicobar",
-        "Dadra & Nagar Haveli": "Dadra and Nagar Haveli",
-        "Daman & Diu": "Daman and Diu",
-        "Odisha": "Orissa",
-        "Uttarakhand": "Uttaranchal",
-    }
-
-    def _state_to_geo(s: object) -> str:
-        t = str(s or "").strip().title()
-        # Title-cases lowercase 'and' too — already correct
-        return _STATE_ALIASES.get(t, t)
-
     with st.container(border=True):
         def _map_dim_ctrl():
             return st.radio(" ", ["Ship-to", "Bill-to"], index=0,
@@ -810,30 +810,288 @@ with tab_be:
     if ag is None:
         st.info("Load a BE file to enable plan-vs-actual comparison.")
     else:
-        b1, b2, b3, b4 = st.columns(4)
-        b1.metric("BE total (MT)", data.fmt(ag.tot_be))
-        b2.metric("Matched actuals (MT)", data.fmt(ag.matched_act))
-        b3.metric("Open pipeline (MT)", data.fmt(ag.matched_pipe))
-        b4.metric("Gap to BE (MT)", data.fmt(ag.tot_be - ag.matched_act))
+        # ── BE KPI tiles + drill buttons ────────────────────────────────────
+        days_in_month = (ag.be_month_end - ag.be_month_start).days + 1
+        now = datetime.now()
+        adj_total = be_logic.adjusted_be(
+            ag.tot_be, now, ag.be_month_start, ag.be_month_end)
+        gap_abs = ag.matched_act - ag.tot_be
+        gap_adj = ag.matched_act - adj_total
 
-        days_in_month = ((ag.be_month_end - ag.be_month_start).days + 1)
+        be_cards = [
+            _kpi_card("k-or", "BE total", data.fmt(ag.tot_be),
+                      f"For {be.month_label} · {be.week or 'W?'}"),
+            _kpi_card(
+                "k-in", "Matched actuals", data.fmt(ag.matched_act),
+                f"{round(ag.matched_act / ag.tot_be * 100) if ag.tot_be else 0}% of BE"),
+            _kpi_card("k-inp", "Open pipeline", data.fmt(ag.matched_pipe),
+                      "From BE distributors"),
+            _kpi_card("k-gap", "Gap vs adjusted BE", data.fmt(gap_adj),
+                      f"AdjBE {data.fmt(adj_total)} · pace to date",
+                      value_cls="dn" if gap_adj < 0 else "up"),
+            _kpi_card("k-re", "Gap vs full BE", data.fmt(gap_abs),
+                      "End-of-month target",
+                      value_cls="dn" if gap_abs < 0 else "up"),
+        ]
+        st.markdown('<div class="kpi-row">' + "".join(be_cards) + "</div>",
+                    unsafe_allow_html=True)
+
+        # KPI drill buttons row
+        bk_cols = st.columns(5)
+        if bk_cols[0].button("🔍 BE breakdown", key="be_dr_be",
+                             use_container_width=True):
+            t = be_logic.be_table(filtered, ag, now)
+            drawer.open_drawer(
+                "BE — per-distributor breakdown",
+                t[t["_hasBE"]].drop(columns=["_distNorm", "_hasBE"]),
+                subtitle=f"{int((t['_hasBE']).sum())} distributors · "
+                         f"{data.fmt(ag.tot_be)} MT total BE",
+                summary=[("BE", data.fmt(ag.tot_be)),
+                         ("Adj BE", data.fmt(adj_total)),
+                         ("Distributors", f"{int(t['_hasBE'].sum()):,}")],
+                filename="be_breakdown.csv")
+        if bk_cols[1].button("🔍 Actuals", key="be_dr_act",
+                             use_container_width=True):
+            be_rows = filtered[filtered["_dnN"].isin(ag.dist_has_be)
+                               & (filtered["_iq"] > 0)]
+            drawer.open_drawer(
+                f"Actuals in {be.month_label} — line items",
+                _kpi_view(be_rows),
+                subtitle=f"{len(be_rows):,} rows · "
+                         f"{data.fmt(ag.matched_act)} MT invoiced",
+                summary=[("Actuals", data.fmt(ag.matched_act)),
+                         ("Lines", f"{len(be_rows):,}")],
+                filename="be_actuals.csv")
+        if bk_cols[2].button("🔍 Pipeline", key="be_dr_pipe",
+                             use_container_width=True):
+            pipe_rows = filtered[filtered["_dnN"].isin(ag.dist_has_be)
+                                 & (filtered["_pend"] > 0)]
+            drawer.open_drawer(
+                "Open pipeline — line items",
+                _kpi_view(pipe_rows),
+                subtitle=f"{len(pipe_rows):,} rows · "
+                         f"{data.fmt(ag.matched_pipe)} MT eligible",
+                summary=[("Pipeline", data.fmt(ag.matched_pipe)),
+                         ("Lines", f"{len(pipe_rows):,}")],
+                filename="be_pipeline.csv")
+        if bk_cols[3].button("🔍 Adjusted gap", key="be_dr_gadj",
+                             use_container_width=True):
+            t = be_logic.be_table(filtered, ag, now)
+            drawer.open_drawer(
+                "Adjusted gap — per distributor",
+                t.drop(columns=["_distNorm", "_hasBE"]),
+                subtitle=f"Pace-adjusted (Today−1). Negative = behind.",
+                summary=[("Adj BE", data.fmt(adj_total)),
+                         ("Actuals", data.fmt(ag.matched_act)),
+                         ("Gap", data.fmt(gap_adj))],
+                filename="be_adjusted_gap.csv")
+        if bk_cols[4].button("🔍 Absolute gap", key="be_dr_gabs",
+                             use_container_width=True):
+            t = be_logic.be_table(filtered, ag, now)
+            drawer.open_drawer(
+                "Absolute gap — per distributor",
+                t.drop(columns=["_distNorm", "_hasBE"]),
+                subtitle="End-of-month target. Negative = behind.",
+                summary=[("BE", data.fmt(ag.tot_be)),
+                         ("Actuals", data.fmt(ag.matched_act)),
+                         ("Gap", data.fmt(gap_abs))],
+                filename="be_absolute_gap.csv")
+
+        # ── BE trajectory chart ─────────────────────────────────────────────
         dist_set = ag.dist_has_be
         daily = data.invoiced_daily_map(
             filtered, ag.be_month_start, ag.be_month_end, inv_index,
             filter_fn=lambda r: be_logic.be_eligible(r, dist_set))
-        st.subheader("Daily invoice trajectory — BE month")
-        st.plotly_chart(
-            plots.be_trajectory(daily, ag.tot_be, be.month_label, days_in_month),
-            use_container_width=True)
+        with st.container(border=True):
+            traj_csv = pd.DataFrame([
+                {"Day": d, "Cumulative invoiced": sum(
+                    daily.get(f"{ag.be_month_start.year:04d}-"
+                              f"{ag.be_month_start.month:02d}-{i:02d}", 0.0)
+                    for i in range(1, d + 1)),
+                 "BE pace": ag.tot_be * d / days_in_month}
+                for d in range(1, days_in_month + 1)
+            ])
+            _chart_header(
+                f"Daily invoice trajectory — {be.month_label}",
+                "Cumulative invoiced vs straight-line BE pace.",
+                csv_df=traj_csv, csv_name="be_trajectory.csv", key="be_traj")
+            st.plotly_chart(
+                plots.be_trajectory(daily, ag.tot_be,
+                                    be.month_label, days_in_month),
+                use_container_width=True)
 
-        st.subheader("Unmatched BE distributors (no actuals)")
-        if ag.unmatched_be:
-            um = pd.DataFrame([{"Distributor": u["dist"], "Region": u["region"],
-                                "BE MT": round(u["qty"])} for u in
-                               sorted(ag.unmatched_be, key=lambda x: -x["qty"])])
-            st.dataframe(um, use_container_width=True, hide_index=True)
-        else:
-            st.caption("Every BE distributor has matching activity.")
+        # ── BE-vs-Actuals table ─────────────────────────────────────────────
+        with st.container(border=True):
+            tbl = be_logic.be_table(filtered, ag, now)
+            _chart_header(
+                "BE vs Actuals — per distributor",
+                "Retail + Self-stocking + Project-thru-Dist. Includes "
+                "distributors with orders but no BE (BE=0). Click a row to drill in.",
+                csv_df=tbl.drop(columns=["_distNorm", "_hasBE"]),
+                csv_name="be_vs_actuals.csv", key="be_table")
+            # Filters
+            fc1, fc2 = st.columns([2, 3])
+            search = fc1.text_input("Search distributor", "",
+                                    key="be_tbl_search").strip().lower()
+            states = sorted(s for s in tbl["State"].unique() if s and s != "—")
+            sel_states = fc2.multiselect("State filter", states, default=[],
+                                         key="be_tbl_states")
+            view = tbl.copy()
+            if search:
+                view = view[view["Distributor"].astype(str).str.lower().str.contains(search)]
+            if sel_states:
+                view = view[view["State"].isin(sel_states)]
+            # Show table with row selection
+            display_cols = ["Distributor", "State", "BE", "Adjusted BE",
+                            "Actuals", "Absolute gap", "Adjusted gap",
+                            "Pending release", "Pending invoice",
+                            "Pending pipeline"]
+            be_tbl_event = st.dataframe(
+                view[display_cols], use_container_width=True, hide_index=True,
+                height=420, on_select="rerun", selection_mode="single-row",
+                key="be_vs_act_tbl")
+            sel_idx = (be_tbl_event.selection.rows
+                       if be_tbl_event and be_tbl_event.selection else [])
+            if sel_idx:
+                row = view.iloc[sel_idx[0]]
+                distN = row["_distNorm"]
+                dist_rows = filtered[filtered["_dnN"] == distN]
+                last = st.session_state.get("_be_tbl_last")
+                if distN != last:
+                    st.session_state["_be_tbl_last"] = distN
+                    drawer.open_drawer(
+                        f"{row['Distributor']} — orders",
+                        _kpi_view(dist_rows),
+                        subtitle=f"{row['State']} · "
+                                 f"BE {data.fmt(row['BE'])} · "
+                                 f"AdjBE {data.fmt(row['Adjusted BE'])} · "
+                                 f"Actuals {data.fmt(row['Actuals'])}",
+                        summary=[("BE", data.fmt(row['BE'])),
+                                 ("Adj BE", data.fmt(row['Adjusted BE'])),
+                                 ("Actuals", data.fmt(row['Actuals'])),
+                                 ("Abs gap", data.fmt(row['Absolute gap'])),
+                                 ("Adj gap", data.fmt(row['Adjusted gap'])),
+                                 ("Pipeline", data.fmt(row['Pending pipeline']))],
+                        filename=f"{row['Distributor'][:30].replace(' ','_')}_orders.csv")
+
+        # ── India gap map (BE tab) ──────────────────────────────────────────
+        with st.container(border=True):
+            def _gap_mode_ctrl():
+                return st.radio(" ", ["Absolute MT", "% gap"], index=0,
+                                horizontal=True, key="be_gap_mode",
+                                label_visibility="collapsed")
+            mode_label = _chart_header(
+                "State-level gap to BE",
+                "Red = behind, green = ahead. Toggle Absolute MT vs % gap.",
+                csv_df=None, key="be_gap_map", controls=_gap_mode_ctrl,
+            ) or "Absolute MT"
+            mode = "pct" if mode_label == "% gap" else "abs"
+            gap_df = be_logic.be_state_gap(filtered, ag, now, mode=mode)
+            gap_df["state"] = gap_df["state"].map(_state_to_geo)
+            gap_df = gap_df.dropna(subset=["value"])
+            st.plotly_chart(
+                plots.india_gap_map(gap_df, mode=mode),
+                use_container_width=True, key="be_gap_chart")
+
+        # ── Unmatched BE distributors ──────────────────────────────────────
+        with st.container(border=True):
+            ub = pd.DataFrame([
+                {"Distributor": u["dist"],
+                 "State": u.get("state", "") or "—",
+                 "Region": u.get("region", ""),
+                 "BE MT": round(u["qty"])}
+                for u in sorted(ag.unmatched_be, key=lambda x: -x["qty"])
+            ])
+            _chart_header(
+                "Unmatched BE distributors (no actuals)",
+                f"{len(ub)} distributors with BE but zero invoicing in "
+                f"{be.month_label}. Click a row to drill into any orders found.",
+                csv_df=ub, csv_name="unmatched_be.csv", key="be_unmatched")
+            if not len(ub):
+                st.caption("Every BE distributor has matching activity.")
+            else:
+                ub_event = st.dataframe(
+                    ub, use_container_width=True, hide_index=True, height=320,
+                    on_select="rerun", selection_mode="single-row",
+                    key="be_unmatched_tbl")
+                sel_idx = (ub_event.selection.rows
+                           if ub_event and ub_event.selection else [])
+                if sel_idx:
+                    pick = ub.iloc[sel_idx[0]]["Distributor"]
+                    last = st.session_state.get("_be_unmatched_last")
+                    if pick != last:
+                        st.session_state["_be_unmatched_last"] = pick
+                        # try to find any orders at all (even outside BE elig)
+                        any_rows = filtered[filtered["_dn"] == pick]
+                        drawer.open_drawer(
+                            f"{pick} — unmatched (no actuals)",
+                            _kpi_view(any_rows) if len(any_rows)
+                            else pd.DataFrame({"info": ["No orders found in current filter."]}),
+                            subtitle=f"BE {data.fmt(ub.iloc[sel_idx[0]]['BE MT'])} MT · "
+                                     f"no eligible activity in {be.month_label}",
+                            summary=[("BE", str(ub.iloc[sel_idx[0]]["BE MT"])),
+                                     ("State", ub.iloc[sel_idx[0]]["State"])],
+                            filename=f"{pick[:30].replace(' ', '_')}_unmatched.csv")
+
+        # ── BE comparison (same-month, two of W1..W4) ───────────────────────
+        same_month_versions = (
+            [v for v in storage.list_be_versions()
+             if v["month"] == f"{be.month_y:04d}-{be.month_m + 1:02d}"]
+            if storage.is_configured() else [])
+        if len(same_month_versions) >= 2:
+            with st.container(border=True):
+                _chart_header(
+                    "Compare two BE weeks",
+                    f"Same-month comparison ({be.month_label}). "
+                    "Pick BE A and BE B to see distributor-level movement.",
+                    csv_df=None, key="be_cmp")
+                c1, c2 = st.columns(2)
+                slot_labels = [v["week"] for v in same_month_versions]
+                a_pick = c1.selectbox("BE A", slot_labels, index=0,
+                                      key="be_cmp_a")
+                b_pick = c2.selectbox("BE B", slot_labels,
+                                      index=min(1, len(slot_labels) - 1),
+                                      key="be_cmp_b")
+                if a_pick != b_pick:
+                    va = next(v for v in same_month_versions if v["week"] == a_pick)
+                    vb = next(v for v in same_month_versions if v["week"] == b_pick)
+                    a_bytes, _ = storage.load_be_version(va["month"], va["week"])
+                    b_bytes, _ = storage.load_be_version(vb["month"], vb["week"])
+                    if a_bytes and b_bytes:
+                        rows_a = parse_be(a_bytes, va["sheet"])
+                        rows_b = parse_be(b_bytes, vb["sheet"])
+                        cmp_tbl = be_logic.be_compare_table(rows_a, rows_b)
+                        cmp_tbl_view = cmp_tbl.rename(columns={
+                            "BE A": f"BE {a_pick}", "BE B": f"BE {b_pick}",
+                            "Δ (B-A)": f"Δ ({b_pick}−{a_pick})",
+                        })
+                        # filters
+                        fc1, fc2 = st.columns([2, 3])
+                        srch = fc1.text_input("Search distributor", "",
+                                              key="cmp_search").strip().lower()
+                        cmp_states = sorted(
+                            s for s in cmp_tbl["State"].unique() if s and s != "—")
+                        cmp_sel_st = fc2.multiselect(
+                            "State filter", cmp_states, default=[],
+                            key="cmp_states")
+                        view = cmp_tbl_view.copy()
+                        if srch:
+                            view = view[view["Distributor"].astype(str)
+                                        .str.lower().str.contains(srch)]
+                        if cmp_sel_st:
+                            view = view[view["State"].isin(cmp_sel_st)]
+                        # CSV
+                        st.download_button(
+                            "⇩ CSV", view.to_csv(index=False).encode("utf-8"),
+                            file_name=f"be_compare_{a_pick}_vs_{b_pick}.csv",
+                            mime="text/csv", key="cmp_dl")
+                        st.dataframe(view, use_container_width=True,
+                                     hide_index=True, height=420)
+                else:
+                    st.caption("Pick two different weeks to compare.")
+        elif storage.is_configured():
+            st.caption("Upload at least two BE weeks (W1, W2, ...) in the same "
+                       "month to enable comparison.")
 
 with tab_dr:
     st.info("Drill-down tab — TODO (iteration). Data layer ready via "
