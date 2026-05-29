@@ -573,7 +573,8 @@ with tab_ov:
         st.plotly_chart(plots.channel_trend(filtered, gran),
                         use_container_width=True)
 
-    # ── Top 10 ship-to states / Grade mix ───────────────────────────────────
+    # ── Order status mix / Grade mix ────────────────────────────────────────
+    # (Top-10 ship-to states moved to the India map sidekick below.)
     def _open_state_drawer(state_name: str) -> None:
         rows = filtered[filtered["_st"] == state_name]
         drawer.open_drawer(
@@ -601,26 +602,17 @@ with tab_ov:
     g1, g2 = st.columns(2)
     with g1:
         with st.container(border=True):
-            _states_csv = (filtered.groupby("_st")["_q"].sum().reset_index()
-                           .sort_values("_q", ascending=False).head(10)
-                           .rename(columns={"_st": "Ship-to state",
-                                            "_q": "Ordered MT"}))
-            _chart_header("Top 10 ship-to states",
-                          "By Ordered MT — click a bar to drill in",
-                          csv_df=_states_csv, csv_name="top_states.csv",
-                          key="states")
-            ev = st.plotly_chart(plots.top_states(filtered),
-                                 use_container_width=True,
-                                 on_select="rerun", key="ch_top_states")
-            try:
-                pts = ev.selection.points if ev and ev.selection else []
-            except Exception:  # noqa: BLE001
-                pts = []
-            if pts:
-                picked = pts[0].get("y")
-                if picked and st.session_state.get("_last_st_pick") != picked:
-                    st.session_state["_last_st_pick"] = picked
-                    _open_state_drawer(picked)
+            _status_csv = (filtered.groupby("_sta")["_q"].sum().reset_index()
+                           .rename(columns={"_sta": "Order status",
+                                            "_q": "Ordered MT"})
+                           .sort_values("Ordered MT", ascending=False))
+            _chart_header("Order status mix",
+                          "Share of Ordered MT by order status — operational "
+                          "health (delivered / confirmed / in-progress / cancelled).",
+                          csv_df=_status_csv, csv_name="status_mix.csv",
+                          key="status")
+            st.plotly_chart(plots.status_mix(filtered),
+                            use_container_width=True)
     with g2:
         with st.container(border=True):
             _grade_csv = (filtered.groupby("_gr")["_q"].sum().reset_index()

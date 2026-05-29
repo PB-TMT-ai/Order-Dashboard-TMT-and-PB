@@ -108,6 +108,12 @@ div[data-testid="stRadio"] label:has(input:checked) {
     background:#002E5D !important; color:#FFFFFF !important;
     box-shadow:0 1px 3px rgba(0,46,93,.25);
 }
+/* Force every child element inside the active pill (text spans, divs, p tags)
+   to inherit the white color so Streamlit's default text color doesn't win. */
+div[data-testid="stRadio"] label[data-checked="true"] *,
+div[data-testid="stRadio"] label:has(input:checked) * {
+    color:#FFFFFF !important;
+}
 
 /* CSV download button — small green pill */
 div[data-testid="stDownloadButton"] > button {

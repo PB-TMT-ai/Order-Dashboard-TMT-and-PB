@@ -121,13 +121,23 @@ def _pie(df: pd.DataFrame, label_col: str, value_col: str, n: int = 10) -> go.Fi
         other = agg[value_col][n:].sum()
         head = pd.concat([head, pd.DataFrame([{label_col: "Other", value_col: other}])])
         agg = head
+    # Truncate long labels for the legend so they don't squeeze the donut.
+    short_labels = agg[label_col].astype(str).str.slice(0, 28).str.cat(
+        agg[label_col].astype(str).str.len().gt(28).map({True: "…", False: ""}))
     fig.add_pie(
-        labels=agg[label_col], values=agg[value_col], hole=0.55,
+        labels=short_labels, values=agg[value_col], hole=0.55,
         marker=dict(line=dict(color="#FFFFFF", width=2)),
         textfont=dict(size=11),
         hovertemplate="<b>%{label}</b><br>%{value:,.0f} MT (%{percent})<extra></extra>",
     )
-    fig.update_layout(height=320, legend=dict(orientation="v", font=dict(size=10)))
+    # Legend below the donut (horizontal) so the chart gets the full width
+    # even when there are many long category labels (e.g. plant names).
+    fig.update_layout(
+        height=380,
+        margin=dict(l=10, r=10, t=10, b=10),
+        legend=dict(orientation="h", yanchor="top", y=-0.05,
+                    xanchor="center", x=0.5, font=dict(size=10)),
+    )
     return fig
 
 
@@ -137,6 +147,11 @@ def grade_mix(df: pd.DataFrame) -> go.Figure:
 
 def plant_mix(df: pd.DataFrame) -> go.Figure:
     return _pie(df, "_cm", "_q")
+
+
+def status_mix(df: pd.DataFrame) -> go.Figure:
+    """Order-status distribution donut (Delivered / Confirmed / In progress / etc.)."""
+    return _pie(df, "_sta", "_q")
 
 
 def india_map(state_values: pd.DataFrame, metric_label: str,
