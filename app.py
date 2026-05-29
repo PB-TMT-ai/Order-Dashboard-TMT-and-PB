@@ -913,12 +913,52 @@ with tab_be:
             ])
             _chart_header(
                 f"Daily invoice trajectory — {be.month_label}",
-                "Cumulative invoiced vs straight-line BE pace.",
+                "Cumulative invoiced vs straight-line BE pace. "
+                "Click a day on the cumulative line to drill in.",
                 csv_df=traj_csv, csv_name="be_trajectory.csv", key="be_traj")
-            st.plotly_chart(
+            traj_ev = st.plotly_chart(
                 plots.be_trajectory(daily, ag.tot_be,
                                     be.month_label, days_in_month),
-                use_container_width=True)
+                use_container_width=True,
+                on_select="rerun", key="be_traj_chart")
+            try:
+                traj_pts = (traj_ev.selection.points
+                            if traj_ev and traj_ev.selection else [])
+            except Exception:  # noqa: BLE001
+                traj_pts = []
+            if traj_pts:
+                pt = traj_pts[0]
+                day = pt.get("x")
+                # Only react to clicks on the Cumulative trace (curveNumber 0)
+                # so clicking the BE-pace dashed line doesn't fire a drawer.
+                if day and pt.get("curve_number", 0) == 0:
+                    last_day = st.session_state.get("_be_traj_last")
+                    if day != last_day:
+                        st.session_state["_be_traj_last"] = day
+                        day_start = ag.be_month_start.replace(
+                            day=int(day), hour=0, minute=0, second=0)
+                        day_end = day_start.replace(hour=23, minute=59, second=59)
+                        # Invoiced-in-day for BE-eligible distributors
+                        elig = filtered[
+                            filtered["_dnN"].isin(ag.dist_has_be)
+                            & (filtered["_pt"] == "TMT")
+                            & (filtered["_iq"] > 0)
+                        ]
+                        day_rows = elig[
+                            elig["_d"].notna()
+                            & (elig["_d"] >= pd.Timestamp(day_start))
+                            & (elig["_d"] <= pd.Timestamp(day_end))
+                        ]
+                        invoiced_mt = float(day_rows["_iq"].sum())
+                        drawer.open_drawer(
+                            f"{be.month_label} · day {int(day)} — invoiced lines",
+                            _kpi_view(day_rows),
+                            subtitle=f"BE-eligible distributors · "
+                                     f"{len(day_rows):,} rows · "
+                                     f"{data.fmt(invoiced_mt)} MT invoiced",
+                            summary=[("Invoiced (day)", data.fmt(invoiced_mt)),
+                                     ("Lines", f"{len(day_rows):,}")],
+                            filename=f"be_traj_day{int(day):02d}.csv")
 
         # ── BE-vs-Actuals table ─────────────────────────────────────────────
         with st.container(border=True):
