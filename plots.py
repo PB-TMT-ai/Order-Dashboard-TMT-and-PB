@@ -253,7 +253,7 @@ def be_trajectory(daily_map: dict[str, float], be_total: float,
     fig.add_scatter(
         x=days, y=cum, mode="lines+markers", name="Cumulative invoiced",
         line=dict(color="#10B981", width=2.5, shape="spline", smoothing=0.8),
-        marker=dict(size=6),
+        marker=dict(size=10, line=dict(color="#FFFFFF", width=2)),
         fill="tozeroy", fillcolor="rgba(16,185,129,.10)",
         hovertemplate="Day %{x}<br>%{y:,.0f} MT<extra>Cumulative</extra>",
     )
