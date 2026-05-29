@@ -485,6 +485,25 @@ st.markdown(drawer._DRAWER_CSS, unsafe_allow_html=True)
 # --------------------------------------------------------------------------- #
 # Chart-card helper
 # --------------------------------------------------------------------------- #
+# Map our state names to whatever the choropleth GeoJSON uses for NAME_1.
+# Ship-to is uppercase ("UTTAR PRADESH"); Bill-to is proper-cased via SC_;
+# the GeoJSON uses proper case plus a handful of legacy spellings.
+_STATE_ALIASES = {
+    "Jammu & Kashmir": "Jammu and Kashmir",
+    "Andaman & Nicobar Islands": "Andaman and Nicobar",
+    "Andaman And Nicobar Islands": "Andaman and Nicobar",
+    "Dadra & Nagar Haveli": "Dadra and Nagar Haveli",
+    "Daman & Diu": "Daman and Diu",
+    "Odisha": "Orissa",
+    "Uttarakhand": "Uttaranchal",
+}
+
+
+def _state_to_geo(s: object) -> str:
+    t = str(s or "").strip().title()
+    return _STATE_ALIASES.get(t, t)
+
+
 def _chart_header(title: str, subtitle: str, *, csv_df: pd.DataFrame | None = None,
                   csv_name: str = "data.csv", key: str = "",
                   controls=None) -> object | None:
@@ -648,25 +667,6 @@ with tab_ov:
             st.plotly_chart(plots.plant_mix(filtered), use_container_width=True)
 
     # ── India heat map + Top-10 sidekick ────────────────────────────────────
-    # Most source workbooks ship state names in uppercase ("UTTAR PRADESH");
-    # the GeoJSON uses proper case ("Uttar Pradesh"). Normalise via title-case
-    # plus a small alias table for the handful that don't match cleanly.
-    _STATE_ALIASES = {
-        # Map our names → the GeoJSON's properties.NAME_1 values
-        "Jammu & Kashmir": "Jammu and Kashmir",
-        "Andaman & Nicobar Islands": "Andaman and Nicobar",
-        "Andaman And Nicobar Islands": "Andaman and Nicobar",
-        "Dadra & Nagar Haveli": "Dadra and Nagar Haveli",
-        "Daman & Diu": "Daman and Diu",
-        "Odisha": "Orissa",
-        "Uttarakhand": "Uttaranchal",
-    }
-
-    def _state_to_geo(s: object) -> str:
-        t = str(s or "").strip().title()
-        # Title-cases lowercase 'and' too — already correct
-        return _STATE_ALIASES.get(t, t)
-
     with st.container(border=True):
         def _map_dim_ctrl():
             return st.radio(" ", ["Ship-to", "Bill-to"], index=0,
@@ -810,34 +810,435 @@ with tab_be:
     if ag is None:
         st.info("Load a BE file to enable plan-vs-actual comparison.")
     else:
-        b1, b2, b3, b4 = st.columns(4)
-        b1.metric("BE total (MT)", data.fmt(ag.tot_be))
-        b2.metric("Matched actuals (MT)", data.fmt(ag.matched_act))
-        b3.metric("Open pipeline (MT)", data.fmt(ag.matched_pipe))
-        b4.metric("Gap to BE (MT)", data.fmt(ag.tot_be - ag.matched_act))
+        # ── BE KPI tiles + drill buttons ────────────────────────────────────
+        days_in_month = (ag.be_month_end - ag.be_month_start).days + 1
+        now = datetime.now()
+        adj_total = be_logic.adjusted_be(
+            ag.tot_be, now, ag.be_month_start, ag.be_month_end)
+        gap_abs = ag.matched_act - ag.tot_be
+        gap_adj = ag.matched_act - adj_total
 
-        days_in_month = ((ag.be_month_end - ag.be_month_start).days + 1)
+        be_cards = [
+            _kpi_card("k-or", "BE total", data.fmt(ag.tot_be),
+                      f"For {be.month_label} · {be.week or 'W?'}"),
+            _kpi_card(
+                "k-in", "Matched actuals", data.fmt(ag.matched_act),
+                f"{round(ag.matched_act / ag.tot_be * 100) if ag.tot_be else 0}% of BE"),
+            _kpi_card("k-inp", "Open pipeline", data.fmt(ag.matched_pipe),
+                      "From BE distributors"),
+            _kpi_card("k-gap", "Gap vs adjusted BE", data.fmt(gap_adj),
+                      f"AdjBE {data.fmt(adj_total)} · pace to date",
+                      value_cls="dn" if gap_adj < 0 else "up"),
+            _kpi_card("k-re", "Gap vs full BE", data.fmt(gap_abs),
+                      "End-of-month target",
+                      value_cls="dn" if gap_abs < 0 else "up"),
+        ]
+        st.markdown('<div class="kpi-row">' + "".join(be_cards) + "</div>",
+                    unsafe_allow_html=True)
+
+        # KPI drill buttons row
+        bk_cols = st.columns(5)
+        if bk_cols[0].button("🔍 BE breakdown", key="be_dr_be",
+                             use_container_width=True):
+            t = be_logic.be_table(filtered, ag, now)
+            drawer.open_drawer(
+                "BE — per-distributor breakdown",
+                t[t["_hasBE"]].drop(columns=["_distNorm", "_hasBE"]),
+                subtitle=f"{int((t['_hasBE']).sum())} distributors · "
+                         f"{data.fmt(ag.tot_be)} MT total BE",
+                summary=[("BE", data.fmt(ag.tot_be)),
+                         ("Adj BE", data.fmt(adj_total)),
+                         ("Distributors", f"{int(t['_hasBE'].sum()):,}")],
+                filename="be_breakdown.csv")
+        if bk_cols[1].button("🔍 Actuals", key="be_dr_act",
+                             use_container_width=True):
+            be_rows = filtered[filtered["_dnN"].isin(ag.dist_has_be)
+                               & (filtered["_iq"] > 0)]
+            drawer.open_drawer(
+                f"Actuals in {be.month_label} — line items",
+                _kpi_view(be_rows),
+                subtitle=f"{len(be_rows):,} rows · "
+                         f"{data.fmt(ag.matched_act)} MT invoiced",
+                summary=[("Actuals", data.fmt(ag.matched_act)),
+                         ("Lines", f"{len(be_rows):,}")],
+                filename="be_actuals.csv")
+        if bk_cols[2].button("🔍 Pipeline", key="be_dr_pipe",
+                             use_container_width=True):
+            pipe_rows = filtered[filtered["_dnN"].isin(ag.dist_has_be)
+                                 & (filtered["_pend"] > 0)]
+            drawer.open_drawer(
+                "Open pipeline — line items",
+                _kpi_view(pipe_rows),
+                subtitle=f"{len(pipe_rows):,} rows · "
+                         f"{data.fmt(ag.matched_pipe)} MT eligible",
+                summary=[("Pipeline", data.fmt(ag.matched_pipe)),
+                         ("Lines", f"{len(pipe_rows):,}")],
+                filename="be_pipeline.csv")
+        if bk_cols[3].button("🔍 Adjusted gap", key="be_dr_gadj",
+                             use_container_width=True):
+            t = be_logic.be_table(filtered, ag, now)
+            drawer.open_drawer(
+                "Adjusted gap — per distributor",
+                t.drop(columns=["_distNorm", "_hasBE"]),
+                subtitle=f"Pace-adjusted (Today−1). Negative = behind.",
+                summary=[("Adj BE", data.fmt(adj_total)),
+                         ("Actuals", data.fmt(ag.matched_act)),
+                         ("Gap", data.fmt(gap_adj))],
+                filename="be_adjusted_gap.csv")
+        if bk_cols[4].button("🔍 Absolute gap", key="be_dr_gabs",
+                             use_container_width=True):
+            t = be_logic.be_table(filtered, ag, now)
+            drawer.open_drawer(
+                "Absolute gap — per distributor",
+                t.drop(columns=["_distNorm", "_hasBE"]),
+                subtitle="End-of-month target. Negative = behind.",
+                summary=[("BE", data.fmt(ag.tot_be)),
+                         ("Actuals", data.fmt(ag.matched_act)),
+                         ("Gap", data.fmt(gap_abs))],
+                filename="be_absolute_gap.csv")
+
+        # ── BE trajectory chart ─────────────────────────────────────────────
         dist_set = ag.dist_has_be
         daily = data.invoiced_daily_map(
             filtered, ag.be_month_start, ag.be_month_end, inv_index,
             filter_fn=lambda r: be_logic.be_eligible(r, dist_set))
-        st.subheader("Daily invoice trajectory — BE month")
-        st.plotly_chart(
-            plots.be_trajectory(daily, ag.tot_be, be.month_label, days_in_month),
-            use_container_width=True)
+        with st.container(border=True):
+            traj_csv = pd.DataFrame([
+                {"Day": d, "Cumulative invoiced": sum(
+                    daily.get(f"{ag.be_month_start.year:04d}-"
+                              f"{ag.be_month_start.month:02d}-{i:02d}", 0.0)
+                    for i in range(1, d + 1)),
+                 "BE pace": ag.tot_be * d / days_in_month}
+                for d in range(1, days_in_month + 1)
+            ])
+            _chart_header(
+                f"Daily invoice trajectory — {be.month_label}",
+                "Cumulative invoiced vs straight-line BE pace. "
+                "Click a day on the cumulative line to drill in.",
+                csv_df=traj_csv, csv_name="be_trajectory.csv", key="be_traj")
+            traj_ev = st.plotly_chart(
+                plots.be_trajectory(daily, ag.tot_be,
+                                    be.month_label, days_in_month),
+                use_container_width=True,
+                on_select="rerun", key="be_traj_chart")
+            try:
+                traj_pts = (traj_ev.selection.points
+                            if traj_ev and traj_ev.selection else [])
+            except Exception:  # noqa: BLE001
+                traj_pts = []
+            if traj_pts:
+                pt = traj_pts[0]
+                day = pt.get("x")
+                # Only react to clicks on the Cumulative trace (curveNumber 0)
+                # so clicking the BE-pace dashed line doesn't fire a drawer.
+                if day and pt.get("curve_number", 0) == 0:
+                    last_day = st.session_state.get("_be_traj_last")
+                    if day != last_day:
+                        st.session_state["_be_traj_last"] = day
+                        day_start = ag.be_month_start.replace(
+                            day=int(day), hour=0, minute=0, second=0)
+                        day_end = day_start.replace(hour=23, minute=59, second=59)
+                        # Invoiced-in-day for BE-eligible distributors
+                        elig = filtered[
+                            filtered["_dnN"].isin(ag.dist_has_be)
+                            & (filtered["_pt"] == "TMT")
+                            & (filtered["_iq"] > 0)
+                        ]
+                        day_rows = elig[
+                            elig["_d"].notna()
+                            & (elig["_d"] >= pd.Timestamp(day_start))
+                            & (elig["_d"] <= pd.Timestamp(day_end))
+                        ]
+                        invoiced_mt = float(day_rows["_iq"].sum())
+                        drawer.open_drawer(
+                            f"{be.month_label} · day {int(day)} — invoiced lines",
+                            _kpi_view(day_rows),
+                            subtitle=f"BE-eligible distributors · "
+                                     f"{len(day_rows):,} rows · "
+                                     f"{data.fmt(invoiced_mt)} MT invoiced",
+                            summary=[("Invoiced (day)", data.fmt(invoiced_mt)),
+                                     ("Lines", f"{len(day_rows):,}")],
+                            filename=f"be_traj_day{int(day):02d}.csv")
 
-        st.subheader("Unmatched BE distributors (no actuals)")
-        if ag.unmatched_be:
-            um = pd.DataFrame([{"Distributor": u["dist"], "Region": u["region"],
-                                "BE MT": round(u["qty"])} for u in
-                               sorted(ag.unmatched_be, key=lambda x: -x["qty"])])
-            st.dataframe(um, use_container_width=True, hide_index=True)
-        else:
-            st.caption("Every BE distributor has matching activity.")
+        # ── BE-vs-Actuals table ─────────────────────────────────────────────
+        with st.container(border=True):
+            tbl = be_logic.be_table(filtered, ag, now)
+            _chart_header(
+                "BE vs Actuals — per distributor",
+                "Retail + Self-stocking + Project-thru-Dist. Includes "
+                "distributors with orders but no BE (BE=0). Click a row to drill in.",
+                csv_df=tbl.drop(columns=["_distNorm", "_hasBE"]),
+                csv_name="be_vs_actuals.csv", key="be_table")
+            # Filters
+            fc1, fc2 = st.columns([2, 3])
+            search = fc1.text_input("Search distributor", "",
+                                    key="be_tbl_search").strip().lower()
+            states = sorted(s for s in tbl["State"].unique() if s and s != "—")
+            sel_states = fc2.multiselect("State filter", states, default=[],
+                                         key="be_tbl_states")
+            view = tbl.copy()
+            if search:
+                view = view[view["Distributor"].astype(str).str.lower().str.contains(search)]
+            if sel_states:
+                view = view[view["State"].isin(sel_states)]
+            # Show table with row selection
+            display_cols = ["Distributor", "State", "BE", "Adjusted BE",
+                            "Actuals", "Absolute gap", "Adjusted gap",
+                            "Pending release", "Pending invoice",
+                            "Pending pipeline"]
+            be_tbl_event = st.dataframe(
+                view[display_cols], use_container_width=True, hide_index=True,
+                height=420, on_select="rerun", selection_mode="single-row",
+                key="be_vs_act_tbl")
+            sel_idx = (be_tbl_event.selection.rows
+                       if be_tbl_event and be_tbl_event.selection else [])
+            if sel_idx:
+                row = view.iloc[sel_idx[0]]
+                distN = row["_distNorm"]
+                dist_rows = filtered[filtered["_dnN"] == distN]
+                last = st.session_state.get("_be_tbl_last")
+                if distN != last:
+                    st.session_state["_be_tbl_last"] = distN
+                    drawer.open_drawer(
+                        f"{row['Distributor']} — orders",
+                        _kpi_view(dist_rows),
+                        subtitle=f"{row['State']} · "
+                                 f"BE {data.fmt(row['BE'])} · "
+                                 f"AdjBE {data.fmt(row['Adjusted BE'])} · "
+                                 f"Actuals {data.fmt(row['Actuals'])}",
+                        summary=[("BE", data.fmt(row['BE'])),
+                                 ("Adj BE", data.fmt(row['Adjusted BE'])),
+                                 ("Actuals", data.fmt(row['Actuals'])),
+                                 ("Abs gap", data.fmt(row['Absolute gap'])),
+                                 ("Adj gap", data.fmt(row['Adjusted gap'])),
+                                 ("Pipeline", data.fmt(row['Pending pipeline']))],
+                        filename=f"{row['Distributor'][:30].replace(' ','_')}_orders.csv")
+
+        # ── India gap map (BE tab) ──────────────────────────────────────────
+        with st.container(border=True):
+            def _gap_mode_ctrl():
+                return st.radio(" ", ["Absolute MT", "% gap"], index=0,
+                                horizontal=True, key="be_gap_mode",
+                                label_visibility="collapsed")
+            mode_label = _chart_header(
+                "State-level gap to BE",
+                "Red = behind, green = ahead. Toggle Absolute MT vs % gap.",
+                csv_df=None, key="be_gap_map", controls=_gap_mode_ctrl,
+            ) or "Absolute MT"
+            mode = "pct" if mode_label == "% gap" else "abs"
+            gap_df = be_logic.be_state_gap(filtered, ag, now, mode=mode)
+            gap_df["state"] = gap_df["state"].map(_state_to_geo)
+            gap_df = gap_df.dropna(subset=["value"])
+            st.plotly_chart(
+                plots.india_gap_map(gap_df, mode=mode),
+                use_container_width=True, key="be_gap_chart")
+
+        # ── Unmatched BE distributors ──────────────────────────────────────
+        with st.container(border=True):
+            ub = pd.DataFrame([
+                {"Distributor": u["dist"],
+                 "State": u.get("state", "") or "—",
+                 "Region": u.get("region", ""),
+                 "BE MT": round(u["qty"])}
+                for u in sorted(ag.unmatched_be, key=lambda x: -x["qty"])
+            ])
+            _chart_header(
+                "Unmatched BE distributors (no actuals)",
+                f"{len(ub)} distributors with BE but zero invoicing in "
+                f"{be.month_label}. Click a row to drill into any orders found.",
+                csv_df=ub, csv_name="unmatched_be.csv", key="be_unmatched")
+            if not len(ub):
+                st.caption("Every BE distributor has matching activity.")
+            else:
+                ub_event = st.dataframe(
+                    ub, use_container_width=True, hide_index=True, height=320,
+                    on_select="rerun", selection_mode="single-row",
+                    key="be_unmatched_tbl")
+                sel_idx = (ub_event.selection.rows
+                           if ub_event and ub_event.selection else [])
+                if sel_idx:
+                    pick = ub.iloc[sel_idx[0]]["Distributor"]
+                    last = st.session_state.get("_be_unmatched_last")
+                    if pick != last:
+                        st.session_state["_be_unmatched_last"] = pick
+                        # try to find any orders at all (even outside BE elig)
+                        any_rows = filtered[filtered["_dn"] == pick]
+                        drawer.open_drawer(
+                            f"{pick} — unmatched (no actuals)",
+                            _kpi_view(any_rows) if len(any_rows)
+                            else pd.DataFrame({"info": ["No orders found in current filter."]}),
+                            subtitle=f"BE {data.fmt(ub.iloc[sel_idx[0]]['BE MT'])} MT · "
+                                     f"no eligible activity in {be.month_label}",
+                            summary=[("BE", str(ub.iloc[sel_idx[0]]["BE MT"])),
+                                     ("State", ub.iloc[sel_idx[0]]["State"])],
+                            filename=f"{pick[:30].replace(' ', '_')}_unmatched.csv")
+
+        # ── BE comparison (same-month, two of W1..W4) ───────────────────────
+        same_month_versions = (
+            [v for v in storage.list_be_versions()
+             if v["month"] == f"{be.month_y:04d}-{be.month_m + 1:02d}"]
+            if storage.is_configured() else [])
+        if len(same_month_versions) >= 2:
+            with st.container(border=True):
+                _chart_header(
+                    "Compare two BE weeks",
+                    f"Same-month comparison ({be.month_label}). "
+                    "Pick BE A and BE B to see distributor-level movement.",
+                    csv_df=None, key="be_cmp")
+                c1, c2 = st.columns(2)
+                slot_labels = [v["week"] for v in same_month_versions]
+                a_pick = c1.selectbox("BE A", slot_labels, index=0,
+                                      key="be_cmp_a")
+                b_pick = c2.selectbox("BE B", slot_labels,
+                                      index=min(1, len(slot_labels) - 1),
+                                      key="be_cmp_b")
+                if a_pick != b_pick:
+                    va = next(v for v in same_month_versions if v["week"] == a_pick)
+                    vb = next(v for v in same_month_versions if v["week"] == b_pick)
+                    a_bytes, _ = storage.load_be_version(va["month"], va["week"])
+                    b_bytes, _ = storage.load_be_version(vb["month"], vb["week"])
+                    if a_bytes and b_bytes:
+                        rows_a = parse_be(a_bytes, va["sheet"])
+                        rows_b = parse_be(b_bytes, vb["sheet"])
+                        cmp_tbl = be_logic.be_compare_table(rows_a, rows_b)
+                        cmp_tbl_view = cmp_tbl.rename(columns={
+                            "BE A": f"BE {a_pick}", "BE B": f"BE {b_pick}",
+                            "Δ (B-A)": f"Δ ({b_pick}−{a_pick})",
+                        })
+                        # filters
+                        fc1, fc2 = st.columns([2, 3])
+                        srch = fc1.text_input("Search distributor", "",
+                                              key="cmp_search").strip().lower()
+                        cmp_states = sorted(
+                            s for s in cmp_tbl["State"].unique() if s and s != "—")
+                        cmp_sel_st = fc2.multiselect(
+                            "State filter", cmp_states, default=[],
+                            key="cmp_states")
+                        view = cmp_tbl_view.copy()
+                        if srch:
+                            view = view[view["Distributor"].astype(str)
+                                        .str.lower().str.contains(srch)]
+                        if cmp_sel_st:
+                            view = view[view["State"].isin(cmp_sel_st)]
+                        # CSV
+                        st.download_button(
+                            "⇩ CSV", view.to_csv(index=False).encode("utf-8"),
+                            file_name=f"be_compare_{a_pick}_vs_{b_pick}.csv",
+                            mime="text/csv", key="cmp_dl")
+                        st.dataframe(view, use_container_width=True,
+                                     hide_index=True, height=420)
+                else:
+                    st.caption("Pick two different weeks to compare.")
+        elif storage.is_configured():
+            st.caption("Upload at least two BE weeks (W1, W2, ...) in the same "
+                       "month to enable comparison.")
 
 with tab_dr:
-    st.info("Drill-down tab — TODO (iteration). Data layer ready via "
-            "`data.aggregate()`; assemble the expandable hierarchy here.")
+    # ── Drill-down: hierarchical view via sunburst + groupable pivot ────────
+    st.markdown(
+        '<div class="chart-title">Drill-down</div>'
+        '<div class="chart-sub">Pick the hierarchy you want to slice by. '
+        'Sunburst shows each level\'s share; the pivot table below lists every '
+        'group with MT and line counts — click a row to drop the underlying '
+        'orders into the drawer.</div>',
+        unsafe_allow_html=True)
+
+    _DIM_OPTS = {
+        "Channel": "_chL",          # human-readable channel label (derived)
+        "Ship to state": "_st",
+        "Bill to state": "_bs",
+        "Distributor": "_dn",
+        "Plant / CM": "_cm",
+        "Grade": "_gr",
+        "Diameter": "_dia",
+        "Form": "_fm",
+        "Order type": "_ot",
+        "Order status": "_sta",
+        "Type (TMT/P&T)": "_pt",
+    }
+    # Provide a friendly channel label column on a copy (we don't mutate `filtered`)
+    drill_df = filtered.copy()
+    if len(drill_df):
+        drill_df["_chL"] = drill_df["_ch"].map(data.CHANNEL_LABELS).fillna(
+            drill_df["_ch"])
+
+    dim_picks = st.multiselect(
+        "Hierarchy (top → bottom, up to 4 levels)",
+        list(_DIM_OPTS.keys()),
+        default=["Channel", "Ship to state", "Distributor"],
+        max_selections=4, key="drill_dims")
+
+    if not dim_picks or not len(drill_df):
+        st.info("Pick at least one dimension above (and apply filters in the "
+                "sidebar) to see the breakdown.")
+    else:
+        path_cols = [_DIM_OPTS[d] for d in dim_picks]
+        # Drop rows missing any chosen dimension so the sunburst stays clean
+        work = drill_df.dropna(subset=path_cols).copy()
+        for col in path_cols:
+            work[col] = work[col].astype(str).str.strip()
+            work = work[work[col] != ""]
+
+        # ── Sunburst ────────────────────────────────────────────────────────
+        with st.container(border=True):
+            _chart_header(
+                " → ".join(dim_picks),
+                "Inner ring = top of hierarchy. Click a segment to zoom in.",
+                csv_df=None, key="drill_sb")
+            import plotly.express as px
+            if len(work):
+                sb = px.sunburst(work, path=path_cols, values="_q",
+                                 color="_q", color_continuous_scale=theme.SEQ_GRADIENT)
+                sb.update_traces(
+                    hovertemplate="<b>%{label}</b><br>%{value:,.0f} MT"
+                                  "<br>%{percentParent:.1%} of parent<extra></extra>")
+                sb.update_layout(height=500, margin=dict(l=0, r=0, t=0, b=0),
+                                 coloraxis_showscale=False)
+                st.plotly_chart(sb, use_container_width=True)
+            else:
+                st.caption("No rows match — try a different hierarchy.")
+
+        # ── Pivot table with click-row drawer ───────────────────────────────
+        with st.container(border=True):
+            piv = (work.groupby(path_cols)
+                   .agg(**{"Ordered MT": ("_q", "sum"),
+                           "Released MT": ("_rq", "sum"),
+                           "Invoiced MT": ("_iq", "sum"),
+                           "Lines": ("_q", "size")})
+                   .reset_index()
+                   .sort_values("Ordered MT", ascending=False))
+            piv_rename = {c: dim_picks[i] for i, c in enumerate(path_cols)}
+            piv = piv.rename(columns=piv_rename)
+            _chart_header(
+                "Group totals", "Click a row to see its line items.",
+                csv_df=piv, csv_name="drill_groups.csv", key="drill_piv")
+            drill_event = st.dataframe(
+                piv, use_container_width=True, hide_index=True, height=460,
+                on_select="rerun", selection_mode="single-row",
+                key="drill_tbl")
+            sel = (drill_event.selection.rows
+                   if drill_event and drill_event.selection else [])
+            if sel:
+                row = piv.iloc[sel[0]]
+                # Reconstruct the mask from the row's dimension values
+                mask = pd.Series(True, index=work.index)
+                for dim_label, col in zip(dim_picks, path_cols):
+                    mask &= work[col].astype(str) == str(row[dim_label])
+                sub = work[mask]
+                key_tag = "/".join(str(row[d]) for d in dim_picks)
+                last = st.session_state.get("_drill_last")
+                if key_tag != last:
+                    st.session_state["_drill_last"] = key_tag
+                    drawer.open_drawer(
+                        " → ".join(str(row[d]) for d in dim_picks),
+                        _kpi_view(sub),
+                        subtitle=f"{len(sub):,} rows · "
+                                 f"{data.fmt(sub['_q'].sum())} MT ordered",
+                        summary=[("Ordered", data.fmt(sub['_q'].sum())),
+                                 ("Released", data.fmt(sub['_rq'].sum())),
+                                 ("Invoiced", data.fmt(sub['_iq'].sum())),
+                                 ("Lines", f"{len(sub):,}")],
+                        filename=f"drill_{key_tag.replace(' ','_')[:50]}.csv")
 
 with tab_oh:
     st.subheader("Orders in Hand")
@@ -849,11 +1250,234 @@ with tab_oh:
     o3.metric("Short-closed lines", f"{len(sc):,}", f"{data.fmt(sc['_pendOrig'].sum())} MT")
 
 with tab_cp:
-    st.info("Period compare tab — TODO (iteration). Use `data.apply_filters()` with "
-            "two date windows and diff the aggregates.")
+    # ── Period compare: two date windows, side-by-side KPIs + overlay trend ─
+    st.markdown(
+        '<div class="chart-title">Period compare</div>'
+        '<div class="chart-sub">Pick two date windows on the same underlying '
+        'filters (sidebar). Compare Ordered / Released / Invoiced totals, per '
+        'channel, and overlay the daily trend.</div>',
+        unsafe_allow_html=True)
+
+    cp_now = datetime.now()
+    cp_def_a_start = cp_now.replace(day=1).date()
+    cp_def_a_end = cp_now.date()
+    # Previous month for window B
+    if cp_now.month == 1:
+        prev_y, prev_m = cp_now.year - 1, 12
+    else:
+        prev_y, prev_m = cp_now.year, cp_now.month - 1
+    import calendar
+    cp_def_b_end_day = calendar.monthrange(prev_y, prev_m)[1]
+    cp_def_b_start = datetime(prev_y, prev_m, 1).date()
+    cp_def_b_end = datetime(prev_y, prev_m, cp_def_b_end_day).date()
+
+    with st.container(border=True):
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown('<div class="chart-title">Window A</div>',
+                        unsafe_allow_html=True)
+            a_from, a_to = st.date_input(
+                "Window A", value=(cp_def_a_start, cp_def_a_end),
+                key="cp_a", label_visibility="collapsed")
+        with cc2:
+            st.markdown('<div class="chart-title">Window B</div>',
+                        unsafe_allow_html=True)
+            b_from, b_to = st.date_input(
+                "Window B", value=(cp_def_b_start, cp_def_b_end),
+                key="cp_b", label_visibility="collapsed")
+
+    def _slice(df: pd.DataFrame, dfrom, dto) -> pd.DataFrame:
+        if not len(df):
+            return df
+        d = df["_d"]
+        return df[d.notna() & (d.dt.date >= dfrom) & (d.dt.date <= dto)]
+
+    win_a = _slice(filtered, a_from, a_to)
+    win_b = _slice(filtered, b_from, b_to)
+
+    def _cmp_card(lbl: str, va: float, vb: float, unit: str = "MT") -> str:
+        delta = va - vb
+        pct = (delta / vb * 100) if vb else 0.0
+        arrow = "▲" if delta >= 0 else "▼"
+        cls = "up" if delta >= 0 else "dn"
+        return (
+            f'<div class="kc k-or"><div class="kl">{lbl}</div>'
+            f'<div class="kv">{data.fmt(va)}<span class="ku">{unit}</span></div>'
+            f'<div class="ks">A vs B: <b class="{cls}">{arrow} '
+            f'{data.fmt(abs(delta))} ({pct:+.1f}%)</b></div>'
+            f'<div class="ks">A {data.fmt(va)} · B {data.fmt(vb)}</div></div>'
+        )
+
+    cards = [
+        _cmp_card("Ordered", float(win_a["_q"].sum()), float(win_b["_q"].sum())),
+        _cmp_card("Released", float(win_a["_rq"].sum()), float(win_b["_rq"].sum())),
+        _cmp_card("Invoiced", float(win_a["_iq"].sum()), float(win_b["_iq"].sum())),
+        _cmp_card("Lines", float(len(win_a)), float(len(win_b)), unit=""),
+    ]
+    st.markdown(
+        '<div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">'
+        + "".join(cards) + "</div>",
+        unsafe_allow_html=True)
+
+    cp_btns = st.columns(2)
+    if cp_btns[0].button("🔍 Window A — line items", key="cp_dr_a",
+                         use_container_width=True):
+        drawer.open_drawer(
+            f"Window A ({a_from} → {a_to}) — line items",
+            _kpi_view(win_a),
+            subtitle=f"{len(win_a):,} rows · {data.fmt(win_a['_q'].sum())} MT",
+            summary=[("Ordered", data.fmt(win_a['_q'].sum())),
+                     ("Released", data.fmt(win_a['_rq'].sum())),
+                     ("Invoiced", data.fmt(win_a['_iq'].sum())),
+                     ("Lines", f"{len(win_a):,}")],
+            filename="window_a_lines.csv")
+    if cp_btns[1].button("🔍 Window B — line items", key="cp_dr_b",
+                         use_container_width=True):
+        drawer.open_drawer(
+            f"Window B ({b_from} → {b_to}) — line items",
+            _kpi_view(win_b),
+            subtitle=f"{len(win_b):,} rows · {data.fmt(win_b['_q'].sum())} MT",
+            summary=[("Ordered", data.fmt(win_b['_q'].sum())),
+                     ("Released", data.fmt(win_b['_rq'].sum())),
+                     ("Invoiced", data.fmt(win_b['_iq'].sum())),
+                     ("Lines", f"{len(win_b):,}")],
+            filename="window_b_lines.csv")
+
+    # Per-channel comparison table
+    with st.container(border=True):
+        def _ch_agg(df: pd.DataFrame) -> dict:
+            if not len(df):
+                return {c: 0.0 for c in data.CHANNEL_LABELS}
+            g = df.groupby("_ch")["_q"].sum()
+            return {c: float(g.get(c, 0.0)) for c in data.CHANNEL_LABELS}
+
+        a_ch = _ch_agg(win_a)
+        b_ch = _ch_agg(win_b)
+        ch_rows = []
+        for code, lbl in data.CHANNEL_LABELS.items():
+            va, vb = a_ch[code], b_ch[code]
+            ch_rows.append({
+                "Channel": lbl,
+                "Window A (MT)": va, "Window B (MT)": vb,
+                "Δ (A−B) MT": va - vb,
+                "% change": (va - vb) / vb * 100 if vb else 0.0,
+            })
+        ch_df = pd.DataFrame(ch_rows)
+        _chart_header(
+            "Per-channel comparison",
+            "Side-by-side Ordered MT across windows for each channel.",
+            csv_df=ch_df, csv_name="period_compare_channels.csv", key="cp_ch")
+        st.dataframe(ch_df, use_container_width=True, hide_index=True)
+
+    # Overlay daily trend
+    with st.container(border=True):
+        _chart_header(
+            "Daily Ordered MT — overlay",
+            "Both windows on the same x-axis (1..N days). A solid · B dashed.",
+            csv_df=None, key="cp_overlay")
+
+        def _by_day(df: pd.DataFrame, dfrom) -> pd.Series:
+            if not len(df):
+                return pd.Series(dtype=float)
+            x = df.dropna(subset=["_d"]).copy()
+            x["_day_off"] = (x["_d"].dt.date - dfrom).apply(lambda d: d.days + 1)
+            return x.groupby("_day_off")["_q"].sum()
+
+        sa = _by_day(win_a, a_from)
+        sb = _by_day(win_b, b_from)
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        if len(sa):
+            fig.add_scatter(x=sa.index, y=sa.values, mode="lines+markers",
+                            name=f"Window A ({a_from} → {a_to})",
+                            line=dict(color=theme.JSW_NAVY, width=2.5,
+                                      shape="spline", smoothing=0.8),
+                            marker=dict(size=5))
+        if len(sb):
+            fig.add_scatter(x=sb.index, y=sb.values, mode="lines+markers",
+                            name=f"Window B ({b_from} → {b_to})",
+                            line=dict(color=theme.JSW_RED, width=2,
+                                      dash="dash", shape="spline", smoothing=0.8),
+                            marker=dict(size=5))
+        fig.update_layout(height=320, xaxis_title="Day in window",
+                          yaxis_title="Ordered MT",
+                          legend=dict(orientation="h", y=-0.18))
+        st.plotly_chart(theme.isolate_on_hover(fig), use_container_width=True)
 
 with tab_sc:
-    st.info("Scheme analysis tab — TODO (iteration).")
+    # ── Scheme analysis: cross-tabs by Payment Terms / Order Type / Delivery ─
+    st.markdown(
+        '<div class="chart-title">Scheme analysis</div>'
+        '<div class="chart-sub">Distribution of orders by the dimensions that '
+        'typically encode scheme: Payment Terms, Order Type, and Delivery Mode. '
+        'Click any group to drill into its line items.</div>',
+        unsafe_allow_html=True)
+
+    if not len(filtered):
+        st.info("Apply filters in the sidebar to see distribution.")
+    else:
+        # KPI strip: count of distinct schemes by dim
+        n_ptm = int(filtered["_p2"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        n_dlm = int(filtered["_dl"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        n_ot = int(filtered["_ot"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        sc_cards = [
+            _kpi_card("k-or", "Distinct Payment Terms", f"{n_ptm:,}", "Schemes"),
+            _kpi_card("k-re", "Distinct Delivery Modes", f"{n_dlm:,}", "Modes"),
+            _kpi_card("k-in", "Distinct Order Types", f"{n_ot:,}", "Types"),
+        ]
+        st.markdown(
+            '<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);">'
+            + "".join(sc_cards) + "</div>",
+            unsafe_allow_html=True)
+
+        def _scheme_table(col: str, label: str, key: str,
+                          csv_name: str) -> None:
+            tbl = (filtered.assign(_grp=filtered[col].astype(str).str.strip()
+                                  .replace("", "—"))
+                   .groupby("_grp")
+                   .agg(**{"Ordered MT": ("_q", "sum"),
+                           "Released MT": ("_rq", "sum"),
+                           "Invoiced MT": ("_iq", "sum"),
+                           "Lines": ("_q", "size")})
+                   .reset_index()
+                   .rename(columns={"_grp": label})
+                   .sort_values("Ordered MT", ascending=False))
+            with st.container(border=True):
+                _chart_header(
+                    f"By {label}",
+                    f"Click a row to drill into its line items.",
+                    csv_df=tbl, csv_name=csv_name, key=key)
+                ev = st.dataframe(
+                    tbl, use_container_width=True, hide_index=True, height=360,
+                    on_select="rerun", selection_mode="single-row",
+                    key=f"sc_tbl_{key}")
+                rows = (ev.selection.rows
+                        if ev and ev.selection else [])
+                if rows:
+                    pick = tbl.iloc[rows[0]][label]
+                    last_key = f"_sc_last_{key}"
+                    if st.session_state.get(last_key) != pick:
+                        st.session_state[last_key] = pick
+                        sub = filtered[
+                            filtered[col].astype(str).str.strip()
+                            .replace("", "—") == pick]
+                        drawer.open_drawer(
+                            f"{label} = {pick} — line items",
+                            _kpi_view(sub),
+                            subtitle=f"{len(sub):,} rows · "
+                                     f"{data.fmt(sub['_q'].sum())} MT ordered",
+                            summary=[("Ordered", data.fmt(sub['_q'].sum())),
+                                     ("Released", data.fmt(sub['_rq'].sum())),
+                                     ("Invoiced", data.fmt(sub['_iq'].sum())),
+                                     ("Lines", f"{len(sub):,}")],
+                            filename=f"{csv_name.replace('.csv','')}_{pick[:20].replace(' ','_')}.csv")
+
+        _scheme_table("_p2", "Payment Terms",
+                      "ptm", "scheme_payment_terms.csv")
+        _scheme_table("_dl", "Delivery Mode",
+                      "dlm", "scheme_delivery_mode.csv")
+        _scheme_table("_ot", "Order Type",
+                      "ot", "scheme_order_type.csv")
 
 with tab_ln:
     st.subheader("Line items")

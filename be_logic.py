@@ -119,14 +119,21 @@ def parse_be_sheet(df_aoa: list[list[Any]]) -> list[dict]:
 
 
 def flatten_be_atomic(be_rows: list[dict]) -> list[dict]:
-    """Club BE rows: ONE entry per distributor (summed across states/grades/cats)."""
+    """Club BE rows: ONE entry per distributor (summed across states/grades/cats).
+
+    Preserves the distributor's primary state (first non-empty seen) so the
+    BE-vs-Actuals table and India gap map can render state-level views.
+    """
     grp: dict[str, dict] = {}
     for b in be_rows:
         row = grp.get(b["distNorm"])
         if row is None:
             row = {"dist": b["distributor"], "distNorm": b["distNorm"],
-                   "region": b["region"], "qty": 0.0}
+                   "region": b["region"], "state": b.get("state", ""),
+                   "qty": 0.0}
             grp[b["distNorm"]] = row
+        if not row["state"] and b.get("state"):
+            row["state"] = b["state"]
         row["qty"] += (b.get("retail_fe550", 0) + b.get("retail_fe550d", 0)
                        + b.get("project_fe550", 0) + b.get("project_fe550d", 0))
     return [a for a in grp.values() if a["qty"] > 0]
@@ -240,3 +247,163 @@ def month_label_from_value(month_val: str) -> tuple[str, int, int]:
     """'YYYY-MM' -> (label, year, month0)."""
     y, m = (int(x) for x in month_val.split("-"))
     return f"{MOS[m - 1]} {y}", y, m - 1
+
+
+# ─── Phase 4 helpers — BE-vs-Actuals table, comparison, state gap ──────────
+def adjusted_be(be_qty: float, today: datetime,
+                month_start: datetime, month_end: datetime) -> float:
+    """Pro-rate BE through (today − 1).
+
+    For past months → returns full BE (month is complete).
+    For the current month → BE × (days_elapsed_through_yesterday / days_in_month).
+    For future months → returns 0.
+    """
+    if today.date() > month_end.date():
+        return float(be_qty)
+    if today.date() <= month_start.date():
+        return 0.0
+    days_in_month = (month_end - month_start).days + 1
+    days_elapsed = (today.date() - month_start.date()).days  # through yesterday
+    days_elapsed = max(0, min(days_in_month, days_elapsed))
+    return float(be_qty) * days_elapsed / days_in_month
+
+
+def be_table(df: pd.DataFrame, ag: BeAggregate,
+             today: datetime | None = None) -> pd.DataFrame:
+    """Per-distributor BE-vs-Actuals table.
+
+    Includes every distributor with BE (matched + unmatched) plus distributors
+    with eligible orders but no BE (Target=0). Columns:
+      Distributor, State, BE, Adjusted BE, Actuals, Absolute gap,
+      Adjusted gap, Pending release, Pending invoice, Pending pipeline.
+    """
+    if today is None:
+        today = datetime.now()
+
+    # Eligible activity universe: TMT + Fe 550/550D + retail/SS/PD
+    elig = df[
+        (df["_pt"] == "TMT")
+        & df["_gr"].astype(str).str.lower().str.replace(" ", "", regex=False)
+            .isin(("fe550", "fe550d"))
+        & df["_ch"].isin(["rt", "ss", "pd"])
+    ].copy() if len(df) else df
+
+    rows: list[dict] = []
+
+    # 1) Every BE distributor (matched + unmatched in actuals)
+    for atom in ag.atomic:
+        distN = atom["distNorm"]
+        orders = ag.orders_by_key.get(distN, [])
+        actuals = sum(o["invQty"] for o in orders)
+        dist_rows = elig[elig["_dnN"] == distN] if len(elig) else elig
+        pend_rel = float(dist_rows["_pend"].sum()) if len(dist_rows) else 0.0
+        pend_inv = float(dist_rows["_pendInv"].sum()) if len(dist_rows) else 0.0
+        be_qty = float(atom["qty"])
+        adj_be = adjusted_be(be_qty, today,
+                             ag.be_month_start, ag.be_month_end)
+        rows.append({
+            "Distributor": atom["dist"],
+            "State": atom.get("state", "") or "—",
+            "BE": be_qty,
+            "Adjusted BE": adj_be,
+            "Actuals": float(actuals),
+            "Absolute gap": float(actuals) - be_qty,
+            "Adjusted gap": float(actuals) - adj_be,
+            "Pending release": pend_rel,
+            "Pending invoice": pend_inv,
+            "Pending pipeline": pend_rel + pend_inv,
+            "_distNorm": distN,
+            "_hasBE": True,
+        })
+
+    # 2) Distributors with eligible orders but NO BE — Target 0
+    if len(elig):
+        no_be = elig[~elig["_dnN"].isin(ag.dist_has_be)]
+        for distN, g in no_be.groupby("_dnN"):
+            actuals_in_month = float(
+                invoiced_in_range_df(g, ag.be_month_start, ag.be_month_end))
+            pend_rel = float(g["_pend"].sum())
+            pend_inv = float(g["_pendInv"].sum())
+            rows.append({
+                "Distributor": g["_dn"].iloc[0] or "Direct",
+                "State": (g["_st"].iloc[0] or "").title() or "—",
+                "BE": 0.0,
+                "Adjusted BE": 0.0,
+                "Actuals": actuals_in_month,
+                "Absolute gap": actuals_in_month,
+                "Adjusted gap": actuals_in_month,
+                "Pending release": pend_rel,
+                "Pending invoice": pend_inv,
+                "Pending pipeline": pend_rel + pend_inv,
+                "_distNorm": distN,
+                "_hasBE": False,
+            })
+    out = pd.DataFrame(rows)
+    if not len(out):
+        return out
+    return out.sort_values("BE", ascending=False).reset_index(drop=True)
+
+
+def invoiced_in_range_df(group: pd.DataFrame, frm: datetime,
+                          to: datetime) -> float:
+    """Sum invoiced quantity that fell into [frm, to] for a row group.
+
+    Uses the simple per-row date attribution (good enough for the
+    no-BE-distributor branch which doesn't have a per-invoice index handy).
+    """
+    if not len(group):
+        return 0.0
+    inside = group[
+        group["_d"].notna()
+        & (group["_d"] >= pd.Timestamp(frm))
+        & (group["_d"] <= pd.Timestamp(to))
+    ]
+    return float(inside["_iq"].sum()) if len(inside) else 0.0
+
+
+def be_state_gap(df: pd.DataFrame, ag: BeAggregate, today: datetime,
+                 mode: str = "abs") -> pd.DataFrame:
+    """Aggregate the BE-vs-Actuals table to (state, value, be, actuals).
+
+    `mode`: "abs" → value = Actuals − AdjBE (MT). "pct" → value = (gap/BE)*100,
+    NaN when BE = 0.
+    """
+    table = be_table(df, ag, today)
+    if not len(table):
+        return pd.DataFrame(columns=["state", "value", "be", "actuals"])
+    g = table.groupby("State").agg(
+        be=("BE", "sum"), actuals=("Actuals", "sum"),
+        adj_be=("Adjusted BE", "sum")).reset_index()
+    g = g[g["State"].astype(str).str.strip() != ""]
+    g = g[g["State"] != "—"]
+    if mode == "pct":
+        g["value"] = (g["actuals"] - g["be"]) / g["be"].replace(0, float("nan")) * 100.0
+    else:
+        g["value"] = g["actuals"] - g["adj_be"]
+    return g.rename(columns={"State": "state"})[
+        ["state", "value", "be", "actuals"]]
+
+
+def be_compare_table(rows_a: list[dict], rows_b: list[dict]) -> pd.DataFrame:
+    """Side-by-side comparison of two BE versions at distributor level."""
+    a_atomic = {r["distNorm"]: r for r in flatten_be_atomic(rows_a)}
+    b_atomic = {r["distNorm"]: r for r in flatten_be_atomic(rows_b)}
+    keys = set(a_atomic) | set(b_atomic)
+    rows: list[dict] = []
+    for k in keys:
+        a = a_atomic.get(k, {})
+        b = b_atomic.get(k, {})
+        be_a = float(a.get("qty", 0.0))
+        be_b = float(b.get("qty", 0.0))
+        rows.append({
+            "Distributor": (b.get("dist") or a.get("dist") or ""),
+            "State": (b.get("state") or a.get("state") or "—"),
+            "BE A": be_a, "BE B": be_b,
+            "Δ (B-A)": be_b - be_a,
+            "% change": ((be_b - be_a) / be_a * 100.0) if be_a else float("nan"),
+        })
+    out = pd.DataFrame(rows)
+    if not len(out):
+        return out
+    return out.sort_values("Δ (B-A)", key=lambda s: s.abs(),
+                           ascending=False).reset_index(drop=True)
