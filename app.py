@@ -1134,8 +1134,111 @@ with tab_be:
                        "month to enable comparison.")
 
 with tab_dr:
-    st.info("Drill-down tab — TODO (iteration). Data layer ready via "
-            "`data.aggregate()`; assemble the expandable hierarchy here.")
+    # ── Drill-down: hierarchical view via sunburst + groupable pivot ────────
+    st.markdown(
+        '<div class="chart-title">Drill-down</div>'
+        '<div class="chart-sub">Pick the hierarchy you want to slice by. '
+        'Sunburst shows each level\'s share; the pivot table below lists every '
+        'group with MT and line counts — click a row to drop the underlying '
+        'orders into the drawer.</div>',
+        unsafe_allow_html=True)
+
+    _DIM_OPTS = {
+        "Channel": "_chL",          # human-readable channel label (derived)
+        "Ship to state": "_st",
+        "Bill to state": "_bs",
+        "Distributor": "_dn",
+        "Plant / CM": "_cm",
+        "Grade": "_gr",
+        "Diameter": "_dia",
+        "Form": "_fm",
+        "Order type": "_ot",
+        "Order status": "_sta",
+        "Type (TMT/P&T)": "_pt",
+    }
+    # Provide a friendly channel label column on a copy (we don't mutate `filtered`)
+    drill_df = filtered.copy()
+    if len(drill_df):
+        drill_df["_chL"] = drill_df["_ch"].map(data.CHANNEL_LABELS).fillna(
+            drill_df["_ch"])
+
+    dim_picks = st.multiselect(
+        "Hierarchy (top → bottom, up to 4 levels)",
+        list(_DIM_OPTS.keys()),
+        default=["Channel", "Ship to state", "Distributor"],
+        max_selections=4, key="drill_dims")
+
+    if not dim_picks or not len(drill_df):
+        st.info("Pick at least one dimension above (and apply filters in the "
+                "sidebar) to see the breakdown.")
+    else:
+        path_cols = [_DIM_OPTS[d] for d in dim_picks]
+        # Drop rows missing any chosen dimension so the sunburst stays clean
+        work = drill_df.dropna(subset=path_cols).copy()
+        for col in path_cols:
+            work[col] = work[col].astype(str).str.strip()
+            work = work[work[col] != ""]
+
+        # ── Sunburst ────────────────────────────────────────────────────────
+        with st.container(border=True):
+            _chart_header(
+                " → ".join(dim_picks),
+                "Inner ring = top of hierarchy. Click a segment to zoom in.",
+                csv_df=None, key="drill_sb")
+            import plotly.express as px
+            if len(work):
+                sb = px.sunburst(work, path=path_cols, values="_q",
+                                 color="_q", color_continuous_scale=theme.SEQ_GRADIENT)
+                sb.update_traces(
+                    hovertemplate="<b>%{label}</b><br>%{value:,.0f} MT"
+                                  "<br>%{percentParent:.1%} of parent<extra></extra>")
+                sb.update_layout(height=500, margin=dict(l=0, r=0, t=0, b=0),
+                                 coloraxis_showscale=False)
+                st.plotly_chart(sb, use_container_width=True)
+            else:
+                st.caption("No rows match — try a different hierarchy.")
+
+        # ── Pivot table with click-row drawer ───────────────────────────────
+        with st.container(border=True):
+            piv = (work.groupby(path_cols)
+                   .agg(**{"Ordered MT": ("_q", "sum"),
+                           "Released MT": ("_rq", "sum"),
+                           "Invoiced MT": ("_iq", "sum"),
+                           "Lines": ("_q", "size")})
+                   .reset_index()
+                   .sort_values("Ordered MT", ascending=False))
+            piv_rename = {c: dim_picks[i] for i, c in enumerate(path_cols)}
+            piv = piv.rename(columns=piv_rename)
+            _chart_header(
+                "Group totals", "Click a row to see its line items.",
+                csv_df=piv, csv_name="drill_groups.csv", key="drill_piv")
+            drill_event = st.dataframe(
+                piv, use_container_width=True, hide_index=True, height=460,
+                on_select="rerun", selection_mode="single-row",
+                key="drill_tbl")
+            sel = (drill_event.selection.rows
+                   if drill_event and drill_event.selection else [])
+            if sel:
+                row = piv.iloc[sel[0]]
+                # Reconstruct the mask from the row's dimension values
+                mask = pd.Series(True, index=work.index)
+                for dim_label, col in zip(dim_picks, path_cols):
+                    mask &= work[col].astype(str) == str(row[dim_label])
+                sub = work[mask]
+                key_tag = "/".join(str(row[d]) for d in dim_picks)
+                last = st.session_state.get("_drill_last")
+                if key_tag != last:
+                    st.session_state["_drill_last"] = key_tag
+                    drawer.open_drawer(
+                        " → ".join(str(row[d]) for d in dim_picks),
+                        _kpi_view(sub),
+                        subtitle=f"{len(sub):,} rows · "
+                                 f"{data.fmt(sub['_q'].sum())} MT ordered",
+                        summary=[("Ordered", data.fmt(sub['_q'].sum())),
+                                 ("Released", data.fmt(sub['_rq'].sum())),
+                                 ("Invoiced", data.fmt(sub['_iq'].sum())),
+                                 ("Lines", f"{len(sub):,}")],
+                        filename=f"drill_{key_tag.replace(' ','_')[:50]}.csv")
 
 with tab_oh:
     st.subheader("Orders in Hand")
@@ -1147,11 +1250,234 @@ with tab_oh:
     o3.metric("Short-closed lines", f"{len(sc):,}", f"{data.fmt(sc['_pendOrig'].sum())} MT")
 
 with tab_cp:
-    st.info("Period compare tab — TODO (iteration). Use `data.apply_filters()` with "
-            "two date windows and diff the aggregates.")
+    # ── Period compare: two date windows, side-by-side KPIs + overlay trend ─
+    st.markdown(
+        '<div class="chart-title">Period compare</div>'
+        '<div class="chart-sub">Pick two date windows on the same underlying '
+        'filters (sidebar). Compare Ordered / Released / Invoiced totals, per '
+        'channel, and overlay the daily trend.</div>',
+        unsafe_allow_html=True)
+
+    cp_now = datetime.now()
+    cp_def_a_start = cp_now.replace(day=1).date()
+    cp_def_a_end = cp_now.date()
+    # Previous month for window B
+    if cp_now.month == 1:
+        prev_y, prev_m = cp_now.year - 1, 12
+    else:
+        prev_y, prev_m = cp_now.year, cp_now.month - 1
+    import calendar
+    cp_def_b_end_day = calendar.monthrange(prev_y, prev_m)[1]
+    cp_def_b_start = datetime(prev_y, prev_m, 1).date()
+    cp_def_b_end = datetime(prev_y, prev_m, cp_def_b_end_day).date()
+
+    with st.container(border=True):
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown('<div class="chart-title">Window A</div>',
+                        unsafe_allow_html=True)
+            a_from, a_to = st.date_input(
+                "Window A", value=(cp_def_a_start, cp_def_a_end),
+                key="cp_a", label_visibility="collapsed")
+        with cc2:
+            st.markdown('<div class="chart-title">Window B</div>',
+                        unsafe_allow_html=True)
+            b_from, b_to = st.date_input(
+                "Window B", value=(cp_def_b_start, cp_def_b_end),
+                key="cp_b", label_visibility="collapsed")
+
+    def _slice(df: pd.DataFrame, dfrom, dto) -> pd.DataFrame:
+        if not len(df):
+            return df
+        d = df["_d"]
+        return df[d.notna() & (d.dt.date >= dfrom) & (d.dt.date <= dto)]
+
+    win_a = _slice(filtered, a_from, a_to)
+    win_b = _slice(filtered, b_from, b_to)
+
+    def _cmp_card(lbl: str, va: float, vb: float, unit: str = "MT") -> str:
+        delta = va - vb
+        pct = (delta / vb * 100) if vb else 0.0
+        arrow = "▲" if delta >= 0 else "▼"
+        cls = "up" if delta >= 0 else "dn"
+        return (
+            f'<div class="kc k-or"><div class="kl">{lbl}</div>'
+            f'<div class="kv">{data.fmt(va)}<span class="ku">{unit}</span></div>'
+            f'<div class="ks">A vs B: <b class="{cls}">{arrow} '
+            f'{data.fmt(abs(delta))} ({pct:+.1f}%)</b></div>'
+            f'<div class="ks">A {data.fmt(va)} · B {data.fmt(vb)}</div></div>'
+        )
+
+    cards = [
+        _cmp_card("Ordered", float(win_a["_q"].sum()), float(win_b["_q"].sum())),
+        _cmp_card("Released", float(win_a["_rq"].sum()), float(win_b["_rq"].sum())),
+        _cmp_card("Invoiced", float(win_a["_iq"].sum()), float(win_b["_iq"].sum())),
+        _cmp_card("Lines", float(len(win_a)), float(len(win_b)), unit=""),
+    ]
+    st.markdown(
+        '<div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">'
+        + "".join(cards) + "</div>",
+        unsafe_allow_html=True)
+
+    cp_btns = st.columns(2)
+    if cp_btns[0].button("🔍 Window A — line items", key="cp_dr_a",
+                         use_container_width=True):
+        drawer.open_drawer(
+            f"Window A ({a_from} → {a_to}) — line items",
+            _kpi_view(win_a),
+            subtitle=f"{len(win_a):,} rows · {data.fmt(win_a['_q'].sum())} MT",
+            summary=[("Ordered", data.fmt(win_a['_q'].sum())),
+                     ("Released", data.fmt(win_a['_rq'].sum())),
+                     ("Invoiced", data.fmt(win_a['_iq'].sum())),
+                     ("Lines", f"{len(win_a):,}")],
+            filename="window_a_lines.csv")
+    if cp_btns[1].button("🔍 Window B — line items", key="cp_dr_b",
+                         use_container_width=True):
+        drawer.open_drawer(
+            f"Window B ({b_from} → {b_to}) — line items",
+            _kpi_view(win_b),
+            subtitle=f"{len(win_b):,} rows · {data.fmt(win_b['_q'].sum())} MT",
+            summary=[("Ordered", data.fmt(win_b['_q'].sum())),
+                     ("Released", data.fmt(win_b['_rq'].sum())),
+                     ("Invoiced", data.fmt(win_b['_iq'].sum())),
+                     ("Lines", f"{len(win_b):,}")],
+            filename="window_b_lines.csv")
+
+    # Per-channel comparison table
+    with st.container(border=True):
+        def _ch_agg(df: pd.DataFrame) -> dict:
+            if not len(df):
+                return {c: 0.0 for c in data.CHANNEL_LABELS}
+            g = df.groupby("_ch")["_q"].sum()
+            return {c: float(g.get(c, 0.0)) for c in data.CHANNEL_LABELS}
+
+        a_ch = _ch_agg(win_a)
+        b_ch = _ch_agg(win_b)
+        ch_rows = []
+        for code, lbl in data.CHANNEL_LABELS.items():
+            va, vb = a_ch[code], b_ch[code]
+            ch_rows.append({
+                "Channel": lbl,
+                "Window A (MT)": va, "Window B (MT)": vb,
+                "Δ (A−B) MT": va - vb,
+                "% change": (va - vb) / vb * 100 if vb else 0.0,
+            })
+        ch_df = pd.DataFrame(ch_rows)
+        _chart_header(
+            "Per-channel comparison",
+            "Side-by-side Ordered MT across windows for each channel.",
+            csv_df=ch_df, csv_name="period_compare_channels.csv", key="cp_ch")
+        st.dataframe(ch_df, use_container_width=True, hide_index=True)
+
+    # Overlay daily trend
+    with st.container(border=True):
+        _chart_header(
+            "Daily Ordered MT — overlay",
+            "Both windows on the same x-axis (1..N days). A solid · B dashed.",
+            csv_df=None, key="cp_overlay")
+
+        def _by_day(df: pd.DataFrame, dfrom) -> pd.Series:
+            if not len(df):
+                return pd.Series(dtype=float)
+            x = df.dropna(subset=["_d"]).copy()
+            x["_day_off"] = (x["_d"].dt.date - dfrom).apply(lambda d: d.days + 1)
+            return x.groupby("_day_off")["_q"].sum()
+
+        sa = _by_day(win_a, a_from)
+        sb = _by_day(win_b, b_from)
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        if len(sa):
+            fig.add_scatter(x=sa.index, y=sa.values, mode="lines+markers",
+                            name=f"Window A ({a_from} → {a_to})",
+                            line=dict(color=theme.JSW_NAVY, width=2.5,
+                                      shape="spline", smoothing=0.8),
+                            marker=dict(size=5))
+        if len(sb):
+            fig.add_scatter(x=sb.index, y=sb.values, mode="lines+markers",
+                            name=f"Window B ({b_from} → {b_to})",
+                            line=dict(color=theme.JSW_RED, width=2,
+                                      dash="dash", shape="spline", smoothing=0.8),
+                            marker=dict(size=5))
+        fig.update_layout(height=320, xaxis_title="Day in window",
+                          yaxis_title="Ordered MT",
+                          legend=dict(orientation="h", y=-0.18))
+        st.plotly_chart(theme.isolate_on_hover(fig), use_container_width=True)
 
 with tab_sc:
-    st.info("Scheme analysis tab — TODO (iteration).")
+    # ── Scheme analysis: cross-tabs by Payment Terms / Order Type / Delivery ─
+    st.markdown(
+        '<div class="chart-title">Scheme analysis</div>'
+        '<div class="chart-sub">Distribution of orders by the dimensions that '
+        'typically encode scheme: Payment Terms, Order Type, and Delivery Mode. '
+        'Click any group to drill into its line items.</div>',
+        unsafe_allow_html=True)
+
+    if not len(filtered):
+        st.info("Apply filters in the sidebar to see distribution.")
+    else:
+        # KPI strip: count of distinct schemes by dim
+        n_ptm = int(filtered["_p2"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        n_dlm = int(filtered["_dl"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        n_ot = int(filtered["_ot"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        sc_cards = [
+            _kpi_card("k-or", "Distinct Payment Terms", f"{n_ptm:,}", "Schemes"),
+            _kpi_card("k-re", "Distinct Delivery Modes", f"{n_dlm:,}", "Modes"),
+            _kpi_card("k-in", "Distinct Order Types", f"{n_ot:,}", "Types"),
+        ]
+        st.markdown(
+            '<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);">'
+            + "".join(sc_cards) + "</div>",
+            unsafe_allow_html=True)
+
+        def _scheme_table(col: str, label: str, key: str,
+                          csv_name: str) -> None:
+            tbl = (filtered.assign(_grp=filtered[col].astype(str).str.strip()
+                                  .replace("", "—"))
+                   .groupby("_grp")
+                   .agg(**{"Ordered MT": ("_q", "sum"),
+                           "Released MT": ("_rq", "sum"),
+                           "Invoiced MT": ("_iq", "sum"),
+                           "Lines": ("_q", "size")})
+                   .reset_index()
+                   .rename(columns={"_grp": label})
+                   .sort_values("Ordered MT", ascending=False))
+            with st.container(border=True):
+                _chart_header(
+                    f"By {label}",
+                    f"Click a row to drill into its line items.",
+                    csv_df=tbl, csv_name=csv_name, key=key)
+                ev = st.dataframe(
+                    tbl, use_container_width=True, hide_index=True, height=360,
+                    on_select="rerun", selection_mode="single-row",
+                    key=f"sc_tbl_{key}")
+                rows = (ev.selection.rows
+                        if ev and ev.selection else [])
+                if rows:
+                    pick = tbl.iloc[rows[0]][label]
+                    last_key = f"_sc_last_{key}"
+                    if st.session_state.get(last_key) != pick:
+                        st.session_state[last_key] = pick
+                        sub = filtered[
+                            filtered[col].astype(str).str.strip()
+                            .replace("", "—") == pick]
+                        drawer.open_drawer(
+                            f"{label} = {pick} — line items",
+                            _kpi_view(sub),
+                            subtitle=f"{len(sub):,} rows · "
+                                     f"{data.fmt(sub['_q'].sum())} MT ordered",
+                            summary=[("Ordered", data.fmt(sub['_q'].sum())),
+                                     ("Released", data.fmt(sub['_rq'].sum())),
+                                     ("Invoiced", data.fmt(sub['_iq'].sum())),
+                                     ("Lines", f"{len(sub):,}")],
+                            filename=f"{csv_name.replace('.csv','')}_{pick[:20].replace(' ','_')}.csv")
+
+        _scheme_table("_p2", "Payment Terms",
+                      "ptm", "scheme_payment_terms.csv")
+        _scheme_table("_dl", "Delivery Mode",
+                      "dlm", "scheme_delivery_mode.csv")
+        _scheme_table("_ot", "Order Type",
+                      "ot", "scheme_order_type.csv")
 
 with tab_ln:
     st.subheader("Line items")
