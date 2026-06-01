@@ -573,7 +573,8 @@ with tab_ov:
         st.plotly_chart(plots.channel_trend(filtered, gran),
                         use_container_width=True)
 
-    # ── Top 10 ship-to states / Grade mix ───────────────────────────────────
+    # ── Order status mix / Grade mix ────────────────────────────────────────
+    # (Top-10 ship-to states moved to the India map sidekick below.)
     def _open_state_drawer(state_name: str) -> None:
         rows = filtered[filtered["_st"] == state_name]
         drawer.open_drawer(
@@ -601,26 +602,17 @@ with tab_ov:
     g1, g2 = st.columns(2)
     with g1:
         with st.container(border=True):
-            _states_csv = (filtered.groupby("_st")["_q"].sum().reset_index()
-                           .sort_values("_q", ascending=False).head(10)
-                           .rename(columns={"_st": "Ship-to state",
-                                            "_q": "Ordered MT"}))
-            _chart_header("Top 10 ship-to states",
-                          "By Ordered MT — click a bar to drill in",
-                          csv_df=_states_csv, csv_name="top_states.csv",
-                          key="states")
-            ev = st.plotly_chart(plots.top_states(filtered),
-                                 use_container_width=True,
-                                 on_select="rerun", key="ch_top_states")
-            try:
-                pts = ev.selection.points if ev and ev.selection else []
-            except Exception:  # noqa: BLE001
-                pts = []
-            if pts:
-                picked = pts[0].get("y")
-                if picked and st.session_state.get("_last_st_pick") != picked:
-                    st.session_state["_last_st_pick"] = picked
-                    _open_state_drawer(picked)
+            _status_csv = (filtered.groupby("_sta")["_q"].sum().reset_index()
+                           .rename(columns={"_sta": "Order status",
+                                            "_q": "Ordered MT"})
+                           .sort_values("Ordered MT", ascending=False))
+            _chart_header("Order status mix",
+                          "Share of Ordered MT by order status — operational "
+                          "health (delivered / confirmed / in-progress / cancelled).",
+                          csv_df=_status_csv, csv_name="status_mix.csv",
+                          key="status")
+            st.plotly_chart(plots.status_mix(filtered),
+                            use_container_width=True)
     with g2:
         with st.container(border=True):
             _grade_csv = (filtered.groupby("_gr")["_q"].sum().reset_index()
@@ -1241,13 +1233,122 @@ with tab_dr:
                         filename=f"drill_{key_tag.replace(' ','_')[:50]}.csv")
 
 with tab_oh:
-    st.subheader("Orders in Hand")
-    oh = filtered[filtered["_pend"] > 0]
-    o1, o2, o3 = st.columns(3)
-    o1.metric("Pending release (MT)", data.fmt(oh["_pend"].sum()))
-    o2.metric("Pending invoice (MT)", data.fmt(filtered["_pendInv"].sum()))
-    sc = filtered[filtered["_scShort"]]
-    o3.metric("Short-closed lines", f"{len(sc):,}", f"{data.fmt(sc['_pendOrig'].sum())} MT")
+    # ── Orders in Hand: pending pipeline + short-close + breakdowns ─────────
+    st.markdown(
+        '<div class="chart-title">Orders in Hand</div>'
+        '<div class="chart-sub">Pending pipeline across all open orders. '
+        'Short-closed = pending qty &lt; 5 MT or order &gt; 60 days old, treated '
+        'as effectively closed by the business rule.</div>',
+        unsafe_allow_html=True)
+
+    oh_pend = filtered[filtered["_pend"] > 0]
+    oh_pinv = filtered[filtered["_pendInv"] > 0]
+    oh_sc = filtered[filtered["_scShort"]]
+
+    pend_rel_mt = float(oh_pend["_pend"].sum())
+    pend_inv_mt = float(filtered["_pendInv"].sum())
+    sc_mt = float(oh_sc["_pendOrig"].sum())
+    pipeline_mt = pend_rel_mt + pend_inv_mt
+
+    oh_cards = [
+        _kpi_card("k-or", "Pending pipeline", data.fmt(pipeline_mt),
+                  "Release + Invoice MT awaiting action"),
+        _kpi_card("k-re", "Pending release", data.fmt(pend_rel_mt),
+                  f"{len(oh_pend):,} lines"),
+        _kpi_card("k-inp", "Pending invoice", data.fmt(pend_inv_mt),
+                  f"{len(oh_pinv):,} lines"),
+        _kpi_card("k-gap", "Short-closed", f"{len(oh_sc):,}",
+                  f"{data.fmt(sc_mt)} MT original qty",
+                  value_cls="dn" if len(oh_sc) else ""),
+    ]
+    st.markdown(
+        '<div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">'
+        + "".join(oh_cards) + "</div>",
+        unsafe_allow_html=True)
+
+    # 🔍 drill buttons row
+    oh_btns = st.columns(4)
+    if oh_btns[0].button("🔍 Pipeline", key="oh_pipe",
+                         use_container_width=True):
+        sub = filtered[(filtered["_pend"] > 0) | (filtered["_pendInv"] > 0)]
+        drawer.open_drawer(
+            "Pending pipeline — line items", _kpi_view(sub),
+            subtitle=f"{len(sub):,} rows · {data.fmt(pipeline_mt)} MT total pipeline",
+            summary=[("Pipeline", data.fmt(pipeline_mt)),
+                     ("Lines", f"{len(sub):,}")],
+            filename="orders_in_hand_pipeline.csv")
+    if oh_btns[1].button("🔍 Pending release", key="oh_pr",
+                         use_container_width=True):
+        drawer.open_drawer(
+            "Pending release — line items", _kpi_view(oh_pend),
+            subtitle=f"{len(oh_pend):,} rows · {data.fmt(pend_rel_mt)} MT",
+            summary=[("Pending release", data.fmt(pend_rel_mt)),
+                     ("Lines", f"{len(oh_pend):,}")],
+            filename="orders_in_hand_pending_release.csv")
+    if oh_btns[2].button("🔍 Pending invoice", key="oh_pi",
+                         use_container_width=True):
+        drawer.open_drawer(
+            "Pending invoice — line items", _kpi_view(oh_pinv),
+            subtitle=f"{len(oh_pinv):,} rows · {data.fmt(pend_inv_mt)} MT",
+            summary=[("Pending invoice", data.fmt(pend_inv_mt)),
+                     ("Lines", f"{len(oh_pinv):,}")],
+            filename="orders_in_hand_pending_invoice.csv")
+    if oh_btns[3].button("🔍 Short-closed", key="oh_sc",
+                         use_container_width=True):
+        drawer.open_drawer(
+            "Short-closed — line items", _kpi_view(oh_sc),
+            subtitle=f"{len(oh_sc):,} rows · {data.fmt(sc_mt)} MT original qty",
+            summary=[("Short-closed lines", f"{len(oh_sc):,}"),
+                     ("Original MT", data.fmt(sc_mt))],
+            filename="orders_in_hand_short_closed.csv")
+
+    if not len(filtered):
+        st.info("Apply filters in the sidebar to see pending breakdowns.")
+    else:
+        # Breakdown by distributor
+        with st.container(border=True):
+            by_dn = (filtered.assign(_age=(datetime.now() - filtered["_d"]).dt.days
+                                     if "_d" in filtered.columns else pd.NA)
+                     .groupby("_dn")
+                     .agg(**{"Pending release MT": ("_pend", "sum"),
+                             "Pending invoice MT": ("_pendInv", "sum"),
+                             "Pending lines": ("_pend", lambda s: int((s > 0).sum())),
+                             "Avg age (days)": ("_age", "mean")})
+                     .reset_index()
+                     .rename(columns={"_dn": "Distributor"}))
+            by_dn["Pipeline MT"] = by_dn["Pending release MT"] + by_dn["Pending invoice MT"]
+            by_dn = (by_dn[by_dn["Pipeline MT"] > 0]
+                     .sort_values("Pipeline MT", ascending=False))
+            _chart_header(
+                "Pending pipeline by distributor",
+                "Largest outstanding pipelines first. Click a row to drill in.",
+                csv_df=by_dn, csv_name="oh_by_distributor.csv", key="oh_by_dn")
+            oh_ev = st.dataframe(
+                by_dn[["Distributor", "Pipeline MT", "Pending release MT",
+                       "Pending invoice MT", "Pending lines", "Avg age (days)"]],
+                use_container_width=True, hide_index=True, height=420,
+                on_select="rerun", selection_mode="single-row",
+                key="oh_dn_tbl")
+            sel = (oh_ev.selection.rows
+                   if oh_ev and oh_ev.selection else [])
+            if sel:
+                pick = by_dn.iloc[sel[0]]["Distributor"]
+                last = st.session_state.get("_oh_dn_last")
+                if pick != last:
+                    st.session_state["_oh_dn_last"] = pick
+                    sub = filtered[(filtered["_dn"] == pick)
+                                   & ((filtered["_pend"] > 0)
+                                      | (filtered["_pendInv"] > 0))]
+                    drawer.open_drawer(
+                        f"{pick} — pending lines",
+                        _kpi_view(sub),
+                        subtitle=f"{len(sub):,} rows · "
+                                 f"{data.fmt(sub['_pend'].sum() + sub['_pendInv'].sum())} MT pipeline",
+                        summary=[
+                            ("Pending release", data.fmt(sub["_pend"].sum())),
+                            ("Pending invoice", data.fmt(sub["_pendInv"].sum())),
+                            ("Lines", f"{len(sub):,}")],
+                        filename=f"{pick[:30].replace(' ','_')}_pending.csv")
 
 with tab_cp:
     # ── Period compare: two date windows, side-by-side KPIs + overlay trend ─
@@ -1480,16 +1581,48 @@ with tab_sc:
                       "ot", "scheme_order_type.csv")
 
 with tab_ln:
-    st.subheader("Line items")
-    cols = ["_d", "_oid", "_dn", "_pt", "_sta", "_st", "_gr", "_dia", "_fm",
-            "_q", "_rq", "_iq", "_cm"]
-    view = filtered[cols].rename(columns={
-        "_d": "Date", "_oid": "Order ID", "_dn": "Distributor", "_pt": "Type",
-        "_sta": "Status", "_st": "Ship to", "_gr": "Grade", "_dia": "Dia",
-        "_fm": "Form", "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM"})
-    st.download_button("⇩ CSV", view.to_csv(index=False).encode("utf-8"),
-                       file_name="line_items.csv", mime="text/csv")
-    st.dataframe(view, use_container_width=True, hide_index=True, height=520)
+    # ── Line items — searchable table view of filtered rows ────────────────
+    st.markdown(
+        '<div class="chart-title">Line items</div>'
+        '<div class="chart-sub">Every row matching the current sidebar '
+        'filters. Search by Order ID / Distributor / Ship-to state; '
+        'sort by clicking any column header.</div>',
+        unsafe_allow_html=True)
+
+    ln_cards = [
+        _kpi_card("k-or", "Lines", f"{len(filtered):,}", "After filters"),
+        _kpi_card("k-or", "Ordered", data.fmt(float(filtered['_q'].sum())), "MT"),
+        _kpi_card("k-in", "Invoiced", data.fmt(float(filtered['_iq'].sum())), "MT"),
+        _kpi_card("k-inp", "Distinct distributors",
+                  f"{filtered['_dn'].nunique():,}", ""),
+    ]
+    st.markdown(
+        '<div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">'
+        + "".join(ln_cards) + "</div>",
+        unsafe_allow_html=True)
+
+    with st.container(border=True):
+        cols_to_show = ["_d", "_oid", "_dn", "_pt", "_sta", "_st", "_gr",
+                        "_dia", "_fm", "_q", "_rq", "_iq", "_cm"]
+        view = filtered[cols_to_show].rename(columns={
+            "_d": "Date", "_oid": "Order ID", "_dn": "Distributor",
+            "_pt": "Type", "_sta": "Status", "_st": "Ship to",
+            "_gr": "Grade", "_dia": "Dia", "_fm": "Form",
+            "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM"})
+        search = st.text_input(
+            "Search", "", placeholder="Order ID, Distributor, or Ship-to state…",
+            key="ln_search").strip().lower()
+        if search:
+            mask = (
+                view["Order ID"].astype(str).str.lower().str.contains(search)
+                | view["Distributor"].astype(str).str.lower().str.contains(search)
+                | view["Ship to"].astype(str).str.lower().str.contains(search))
+            view = view[mask]
+        _chart_header(
+            f"{len(view):,} of {len(filtered):,} rows",
+            f"Filter: {search!r}" if search else "All rows passing the sidebar filters.",
+            csv_df=view, csv_name="line_items.csv", key="ln")
+        st.dataframe(view, use_container_width=True, hide_index=True, height=560)
 
 
 # ─── Universal drill-down drawer (rendered last so it floats above) ──────────
