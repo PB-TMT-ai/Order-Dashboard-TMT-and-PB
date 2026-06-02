@@ -573,7 +573,7 @@ with tab_ov:
         st.plotly_chart(plots.channel_trend(filtered, gran),
                         use_container_width=True)
 
-    # ── Order status mix / Grade mix ────────────────────────────────────────
+    # ── Form mix / Grade mix ────────────────────────────────────────────────
     # (Top-10 ship-to states moved to the India map sidekick below.)
     def _open_state_drawer(state_name: str) -> None:
         rows = filtered[filtered["_st"] == state_name]
@@ -602,16 +602,18 @@ with tab_ov:
     g1, g2 = st.columns(2)
     with g1:
         with st.container(border=True):
-            _status_csv = (filtered.groupby("_sta")["_q"].sum().reset_index()
-                           .rename(columns={"_sta": "Order status",
-                                            "_q": "Ordered MT"})
-                           .sort_values("Ordered MT", ascending=False))
-            _chart_header("Order status mix",
-                          "Share of Ordered MT by order status — operational "
-                          "health (delivered / confirmed / in-progress / cancelled).",
-                          csv_df=_status_csv, csv_name="status_mix.csv",
-                          key="status")
-            st.plotly_chart(plots.status_mix(filtered),
+            _form_csv = (filtered.assign(
+                             _form_grp=filtered["_fm"].map(plots.form_label))
+                         .groupby("_form_grp")["_q"].sum().reset_index()
+                         .rename(columns={"_form_grp": "Form",
+                                          "_q": "Ordered MT"})
+                         .sort_values("Ordered MT", ascending=False))
+            _chart_header("Form mix",
+                          "Share of Ordered MT by form — Straight / U-bend / "
+                          "Fishbend.",
+                          csv_df=_form_csv, csv_name="form_mix.csv",
+                          key="form")
+            st.plotly_chart(plots.form_mix(filtered),
                             use_container_width=True)
     with g2:
         with st.container(border=True):

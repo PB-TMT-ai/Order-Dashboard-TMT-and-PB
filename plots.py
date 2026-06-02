@@ -149,9 +149,27 @@ def plant_mix(df: pd.DataFrame) -> go.Figure:
     return _pie(df, "_cm", "_q")
 
 
-def status_mix(df: pd.DataFrame) -> go.Figure:
-    """Order-status distribution donut (Delivered / Confirmed / In progress / etc.)."""
-    return _pie(df, "_sta", "_q")
+def form_label(v) -> str:
+    """Normalise a raw Form cell to Straight / U-bend / Fishbend."""
+    s = str(v or "").strip().lower()
+    if not s or s in ("nan", "none", "nat"):
+        return "Unspecified"
+    if "fish" in s:
+        return "Fishbend"
+    if s in ("u", "ubend", "u-bend", "u bend") or (s.startswith("u") and "bend" in s):
+        return "U-bend"
+    if "straight" in s:
+        return "Straight"
+    return str(v).strip().title()
+
+
+def form_mix(df: pd.DataFrame) -> go.Figure:
+    """Form distribution donut — Straight / U-bend / Fishbend."""
+    if not len(df):
+        return _pie(df, "_fm", "_q")
+    d = df.copy()
+    d["_form_grp"] = d["_fm"].map(form_label)
+    return _pie(d, "_form_grp", "_q")
 
 
 def india_map(state_values: pd.DataFrame, metric_label: str,
