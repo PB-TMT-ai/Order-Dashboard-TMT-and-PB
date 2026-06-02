@@ -6,13 +6,13 @@ from that distributor counts as its actuals wherever it ships.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
 
-from data import InvoiceEntry, MOS, invoiced_in_range, norm_name, num
+from data import InvoiceEntry, MOS, cl, invoiced_in_range, norm_name, num
 
 
 @dataclass
@@ -169,6 +169,20 @@ class BeAggregate:
     dist_has_be: set[str]
     be_month_start: datetime
     be_month_end: datetime
+    # Eligible actuals from distributors with NO BE (Target 0). Tracked so the
+    # BE-tab actuals reconcile with the invoiced figure for the same scope.
+    nobe_orders_by_key: dict[str, list[dict]] = field(default_factory=dict)
+    nobe_act: float = 0.0
+    nobe_pipe: float = 0.0
+
+    @property
+    def total_act(self) -> float:
+        """All eligible invoiced actuals in the BE month (BE + no-BE distributors)."""
+        return self.matched_act + self.nobe_act
+
+    @property
+    def total_pipe(self) -> float:
+        return self.matched_pipe + self.nobe_pipe
 
 
 def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
@@ -194,7 +208,9 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
     be_month_end = next_month - timedelta(seconds=1)
 
     orders_by_key: dict[str, list[dict]] = {}
+    nobe_orders_by_key: dict[str, list[dict]] = {}
     matched_act = matched_pipe = 0.0
+    nobe_act = nobe_pipe = 0.0
     for _, r in df.iterrows():
         if r["_pt"] != "TMT":
             continue
@@ -202,8 +218,10 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
             continue
         if r["_ch"] not in ("rt", "ss", "pd"):
             continue
-        if r["_dnN"] not in dist_has_be:
-            continue
+        # Eligible by scope. Distributors in BE feed the plan-vs-actual gap;
+        # eligible distributors with NO BE are tracked separately so the total
+        # actuals still reconcile with the invoiced figure for this scope.
+        has_be = r["_dnN"] in dist_has_be
         inv_qty = invoiced_in_range(r, be_month_start, be_month_end, inv_index)
         pipe_eff = 0.0
         if r["_sta"] != "Cancelled":
@@ -218,10 +236,15 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
                     pipe_eff = pipe
         if inv_qty <= 0 and pipe_eff <= 0:
             continue
-        matched_act += inv_qty
-        matched_pipe += pipe_eff
-        orders_by_key.setdefault(r["_dnN"], []).append(
-            {"r": r, "invQty": inv_qty, "pipe": pipe_eff})
+        entry = {"r": r, "invQty": inv_qty, "pipe": pipe_eff}
+        if has_be:
+            matched_act += inv_qty
+            matched_pipe += pipe_eff
+            orders_by_key.setdefault(r["_dnN"], []).append(entry)
+        else:
+            nobe_act += inv_qty
+            nobe_pipe += pipe_eff
+            nobe_orders_by_key.setdefault(r["_dnN"], []).append(entry)
 
     active = set(orders_by_key.keys())
     unmatched_be = [a for a in atomic if a["distNorm"] not in active]
@@ -232,6 +255,8 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
         tot_be=tot_be, matched_act=matched_act, matched_pipe=matched_pipe,
         unmatched_be=unmatched_be, dist_has_be=dist_has_be,
         be_month_start=be_month_start, be_month_end=be_month_end,
+        nobe_orders_by_key=nobe_orders_by_key, nobe_act=nobe_act,
+        nobe_pipe=nobe_pipe,
     )
 
 
@@ -316,17 +341,20 @@ def be_table(df: pd.DataFrame, ag: BeAggregate,
             "_hasBE": True,
         })
 
-    # 2) Distributors with eligible orders but NO BE — Target 0
+    # 2) Distributors with eligible orders but NO BE — Target 0.
+    # Actuals use the SAME proportional invoice-date attribution as the BE
+    # distributors (via ag.nobe_orders_by_key), so the table's total Actuals
+    # equals ag.total_act and reconciles with the invoiced KPI for this scope.
     if len(elig):
         no_be = elig[~elig["_dnN"].isin(ag.dist_has_be)]
         for distN, g in no_be.groupby("_dnN"):
-            actuals_in_month = float(
-                invoiced_in_range_df(g, ag.be_month_start, ag.be_month_end))
+            orders = ag.nobe_orders_by_key.get(distN, [])
+            actuals_in_month = float(sum(o["invQty"] for o in orders))
             pend_rel = float(g["_pend"].sum())
             pend_inv = float(g["_pendInv"].sum())
             rows.append({
-                "Distributor": g["_dn"].iloc[0] or "Direct",
-                "State": (g["_st"].iloc[0] or "").title() or "—",
+                "Distributor": cl(g["_dn"].iloc[0]) or "Direct",
+                "State": cl(g["_st"].iloc[0]).title() or "—",
                 "BE": 0.0,
                 "Adjusted BE": 0.0,
                 "Actuals": actuals_in_month,
@@ -342,23 +370,6 @@ def be_table(df: pd.DataFrame, ag: BeAggregate,
     if not len(out):
         return out
     return out.sort_values("BE", ascending=False).reset_index(drop=True)
-
-
-def invoiced_in_range_df(group: pd.DataFrame, frm: datetime,
-                          to: datetime) -> float:
-    """Sum invoiced quantity that fell into [frm, to] for a row group.
-
-    Uses the simple per-row date attribution (good enough for the
-    no-BE-distributor branch which doesn't have a per-invoice index handy).
-    """
-    if not len(group):
-        return 0.0
-    inside = group[
-        group["_d"].notna()
-        & (group["_d"] >= pd.Timestamp(frm))
-        & (group["_d"] <= pd.Timestamp(to))
-    ]
-    return float(inside["_iq"].sum()) if len(inside) else 0.0
 
 
 def be_state_gap(df: pd.DataFrame, ag: BeAggregate, today: datetime,
