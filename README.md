@@ -13,7 +13,7 @@ Python/Streamlit port of the HTML dashboard. Same business logic, Cloudflare R2 
 
 ## What changes by platform (heads up)
 - Charts are Plotly, not Chart.js — hover/zoom feel different
-- "Drawer" → inline detail panel below the table (option b)
+- "Drawer" → right-side slide-over detail panel driven by chart/KPI/table clicks
 - Persistence is via Cloudflare R2 (S3-compatible Storage), not browser IndexedDB
 - Streamlit reruns the script on each filter change — first interaction may feel slower
 
@@ -41,6 +41,10 @@ plots.py         # Plotly: channel trend, top states/distributors, India map, BE
 storage_io.py    # Upload/download Excel binaries to Cloudflare R2 (boto3 / S3 API)
 ```
 
+## Tabs
+
+`Overview · Vs BE · Drill-down · Orders in Hand · Period compare · Scheme analysis · Line items`
+
 ## Deploy
 
 - **Streamlit Community Cloud**: connect this repo, add the `R2_*` values as secrets, deploy.
@@ -48,12 +52,14 @@ storage_io.py    # Upload/download Excel binaries to Cloudflare R2 (boto3 / S3 A
 
 ## Iterating with Claude Code
 
-Things the scaffold leaves as `TODO:` for the iteration session:
-- Period Compare tab (logic ready in `data.py`, UI not built)
-- Scheme Analysis tab (same)
-- Drill-down tab (same)
-- Daily invoice trajectory chart on Vs BE tab
-- Inline drill panel for chart clicks
-- CSV exports on every table (`st.download_button` + the existing data frames)
+All scaffold `TODO:` extension points have shipped (PRs #5–#9):
 
-Each `TODO` marks a clear extension point — the data layer is complete; only UI assembly remains.
+- ✅ **Period Compare tab** — two date windows, A-vs-B KPI deltas, per-channel comparison, daily overlay chart
+- ✅ **Scheme Analysis tab** — by Payment Terms / Delivery Mode / Order Type, with CSV + drill
+- ✅ **Drill-down tab** — multi-level dimension picker, Plotly sunburst, pivot table with row drill
+- ✅ **Daily invoice trajectory chart** on the Vs BE tab (clickable to drill a day's invoiced lines)
+- ✅ **Inline drill panel** — right-side slide-over drawer wired to KPI tiles, chart clicks, and table rows
+- ✅ **CSV exports** on every table / chart card (`st.download_button` over the underlying frames)
+
+The data layer is complete and the UI now exposes all of the above. New work
+should extend from these tabs rather than re-implement the scaffold TODOs.

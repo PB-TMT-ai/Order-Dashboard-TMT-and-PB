@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import html
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -815,7 +815,10 @@ with tab_be:
                       f"For {be.month_label} · {be.week or 'W?'}"),
             _kpi_card(
                 "k-in", "Matched actuals", data.fmt(ag.matched_act),
-                f"{round(ag.matched_act / ag.tot_be * 100) if ag.tot_be else 0}% of BE"),
+                f"{round(ag.matched_act / ag.tot_be * 100) if ag.tot_be else 0}% of BE · BE distributors"),
+            _kpi_card(
+                "k-in", "Total eligible actuals", data.fmt(ag.total_act),
+                f"incl. {data.fmt(ag.nobe_act)} from no-BE dist · = Invoiced (TMT Fe550 rt/ss/pd)"),
             _kpi_card("k-inp", "Open pipeline", data.fmt(ag.matched_pipe),
                       "From BE distributors"),
             _kpi_card("k-gap", "Gap vs adjusted BE", data.fmt(gap_adj),
@@ -829,7 +832,7 @@ with tab_be:
                     unsafe_allow_html=True)
 
         # KPI drill buttons row
-        bk_cols = st.columns(5)
+        bk_cols = st.columns(6)
         if bk_cols[0].button("🔍 BE breakdown", key="be_dr_be",
                              use_container_width=True):
             t = be_logic.be_table(filtered, ag, now)
@@ -854,6 +857,24 @@ with tab_be:
                 summary=[("Actuals", data.fmt(ag.matched_act)),
                          ("Lines", f"{len(be_rows):,}")],
                 filename="be_actuals.csv")
+        if bk_cols[5].button("🔍 Total actuals", key="be_dr_tact",
+                             use_container_width=True):
+            elig_inv = filtered[
+                (filtered["_pt"] == "TMT")
+                & filtered["_gr"].astype(str).str.lower()
+                    .str.replace(" ", "", regex=False).isin(("fe550", "fe550d"))
+                & filtered["_ch"].isin(["rt", "ss", "pd"])
+                & (filtered["_iq"] > 0)]
+            drawer.open_drawer(
+                f"Total eligible actuals in {be.month_label} — line items",
+                _kpi_view(elig_inv),
+                subtitle=f"{len(elig_inv):,} rows · {data.fmt(ag.total_act)} MT "
+                         f"(BE + no-BE distributors)",
+                summary=[("Total actuals", data.fmt(ag.total_act)),
+                         ("BE-matched", data.fmt(ag.matched_act)),
+                         ("No-BE", data.fmt(ag.nobe_act)),
+                         ("Lines", f"{len(elig_inv):,}")],
+                filename="be_total_actuals.csv")
         if bk_cols[2].button("🔍 Pipeline", key="be_dr_pipe",
                              use_container_width=True):
             pipe_rows = filtered[filtered["_dnN"].isin(ag.dist_has_be)
@@ -1506,64 +1527,137 @@ with tab_cp:
         st.plotly_chart(theme.isolate_on_hover(fig), use_container_width=True)
 
 with tab_sc:
-    # ── Scheme analysis: cross-tabs by Payment Terms / Order Type / Delivery ─
+    # ── Scheme analysis: Before / During / After uplift around a scheme ──────
     st.markdown(
         '<div class="chart-title">Scheme analysis</div>'
-        '<div class="chart-sub">Distribution of orders by the dimensions that '
-        'typically encode scheme: Payment Terms, Order Type, and Delivery Mode. '
-        'Click any group to drill into its line items.</div>',
+        '<div class="chart-sub">Pick a scheme window. Each distributor is '
+        'measured over three equal-length windows — Before, During and After '
+        'the scheme — to show uplift (During vs Before) and whether it was '
+        'sustained (After vs Before).</div>',
         unsafe_allow_html=True)
 
+    sc_now = datetime.now()
+    sc_def_end = sc_now.date()
+    sc_def_start = (sc_now - timedelta(days=13)).date()
+
+    with st.container(border=True):
+        sc1, sc2, sc3 = st.columns([2, 2, 3])
+        with sc1:
+            sc_start = st.date_input("Scheme start", value=sc_def_start,
+                                     key="sc_start")
+        with sc2:
+            sc_end = st.date_input("Scheme end", value=sc_def_end, key="sc_end")
+        with sc3:
+            sc_metric = st.radio("Metric", ["Ordered", "Invoiced"],
+                                 horizontal=True, key="sc_metric")
+
     if not len(filtered):
-        st.info("Apply filters in the sidebar to see distribution.")
+        st.info("Apply filters in the sidebar to see scheme uplift.")
+    elif sc_end < sc_start:
+        st.warning("Scheme end is before scheme start — adjust the dates.")
     else:
-        # KPI strip: count of distinct schemes by dim
-        n_ptm = int(filtered["_p2"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
-        n_dlm = int(filtered["_dl"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
-        n_ot = int(filtered["_ot"].astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        win_len = (sc_end - sc_start).days + 1
+        before_start = sc_start - timedelta(days=win_len)
+        before_end = sc_start - timedelta(days=1)
+        after_start = sc_end + timedelta(days=1)
+        after_end = sc_end + timedelta(days=win_len)
+
+        def _bounds(s, e):
+            return (datetime.combine(s, datetime.min.time()),
+                    datetime.combine(e, datetime.max.time()))
+
+        def _dist_metric(s, e) -> pd.Series:
+            """Per-distributor metric over [s, e]. Ordered = sum _q by order
+            date; Invoiced = proportional invoice-date attribution."""
+            frm, to = _bounds(s, e)
+            if sc_metric == "Invoiced":
+                ser = data.invoiced_in_period(filtered, frm, to, inv_index)
+                return filtered.assign(_v=ser).groupby("_dn")["_v"].sum()
+            d = filtered["_d"]
+            win = filtered[d.notna() & (d >= frm) & (d <= to)]
+            if not len(win):
+                return pd.Series(dtype=float)
+            return win.groupby("_dn")["_q"].sum()
+
+        b_ser = _dist_metric(before_start, before_end)
+        d_ser = _dist_metric(sc_start, sc_end)
+        a_ser = _dist_metric(after_start, after_end)
+
+        names = sorted(set(b_ser.index) | set(d_ser.index) | set(a_ser.index))
+        rows = []
+        for dn in names:
+            bv = float(b_ser.get(dn, 0.0))
+            dv = float(d_ser.get(dn, 0.0))
+            av = float(a_ser.get(dn, 0.0))
+            if bv == 0 and dv == 0 and av == 0:
+                continue
+            rows.append({
+                "Distributor": dn,
+                "Before MT": bv, "During MT": dv, "After MT": av,
+                "Uplift %": ((dv - bv) / bv * 100) if bv > 0 else float("nan"),
+                "Sustained %": ((av - bv) / bv * 100) if bv > 0 else float("nan"),
+            })
+        tbl = pd.DataFrame(rows)
+
+        tot_b = float(b_ser.sum()) if len(b_ser) else 0.0
+        tot_d = float(d_ser.sum()) if len(d_ser) else 0.0
+        tot_a = float(a_ser.sum()) if len(a_ser) else 0.0
+        ov_upl = ((tot_d - tot_b) / tot_b * 100) if tot_b > 0 else 0.0
+        ov_sus = ((tot_a - tot_b) / tot_b * 100) if tot_b > 0 else 0.0
+        upl_cls = "up" if ov_upl >= 0 else "dn"
+
         sc_cards = [
-            _kpi_card("k-or", "Distinct Payment Terms", f"{n_ptm:,}", "Schemes"),
-            _kpi_card("k-re", "Distinct Delivery Modes", f"{n_dlm:,}", "Modes"),
-            _kpi_card("k-in", "Distinct Order Types", f"{n_ot:,}", "Types"),
+            _kpi_card("k-re", f"Before · {win_len}d", data.fmt(tot_b),
+                      f"{before_start} → {before_end}"),
+            _kpi_card("k-in", f"During · {win_len}d", data.fmt(tot_d),
+                      f"{sc_start} → {sc_end}"),
+            _kpi_card("k-inp", f"After · {win_len}d", data.fmt(tot_a),
+                      f"{after_start} → {after_end}"),
+            (f'<div class="kc k-gap"><div class="kl">Overall uplift</div>'
+             f'<div class="kv {upl_cls}">{ov_upl:+.1f}<span class="ku">%</span></div>'
+             f'<div class="ks">During vs Before · sustained {ov_sus:+.1f}%</div>'
+             f'<div class="ch-subs"></div></div>'),
         ]
         st.markdown(
-            '<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);">'
-            + "".join(sc_cards) + "</div>",
-            unsafe_allow_html=True)
+            '<div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">'
+            + "".join(sc_cards) + "</div>", unsafe_allow_html=True)
+        st.caption(
+            f"Metric: {sc_metric} MT · equal {win_len}-day windows. "
+            "Uplift = (During−Before)/Before; Sustained = (After−Before)/Before. "
+            "Blank % when the distributor had zero Before-window activity.")
 
-        def _scheme_table(col: str, label: str, key: str,
-                          csv_name: str) -> None:
-            tbl = (filtered.assign(_grp=filtered[col].astype(str).str.strip()
-                                  .replace("", "—"))
-                   .groupby("_grp")
-                   .agg(**{"Ordered MT": ("_q", "sum"),
-                           "Released MT": ("_rq", "sum"),
-                           "Invoiced MT": ("_iq", "sum"),
-                           "Lines": ("_q", "size")})
-                   .reset_index()
-                   .rename(columns={"_grp": label})
-                   .sort_values("Ordered MT", ascending=False))
-            with st.container(border=True):
-                _chart_header(
-                    f"By {label}",
-                    f"Click a row to drill into its line items.",
-                    csv_df=tbl, csv_name=csv_name, key=key)
+        with st.container(border=True):
+            _chart_header(
+                f"Per-distributor uplift — {sc_metric} MT",
+                "Click a row to drill into that distributor's During-window "
+                "line items.",
+                csv_df=tbl, csv_name="scheme_uplift.csv", key="sc_upl")
+            if not len(tbl):
+                st.info("No distributor activity in any of the three windows.")
+            else:
+                tbl = tbl.sort_values("During MT", ascending=False)
                 ev = st.dataframe(
-                    tbl, use_container_width=True, hide_index=True, height=360,
+                    tbl, use_container_width=True, hide_index=True, height=420,
                     on_select="rerun", selection_mode="single-row",
-                    key=f"sc_tbl_{key}")
-                rows = (ev.selection.rows
-                        if ev and ev.selection else [])
-                if rows:
-                    pick = tbl.iloc[rows[0]][label]
-                    last_key = f"_sc_last_{key}"
-                    if st.session_state.get(last_key) != pick:
-                        st.session_state[last_key] = pick
+                    key="sc_upl_tbl",
+                    column_config={
+                        "Before MT": st.column_config.NumberColumn(format="%.0f"),
+                        "During MT": st.column_config.NumberColumn(format="%.0f"),
+                        "After MT": st.column_config.NumberColumn(format="%.0f"),
+                        "Uplift %": st.column_config.NumberColumn(format="%.1f%%"),
+                        "Sustained %": st.column_config.NumberColumn(format="%.1f%%"),
+                    })
+                picks = ev.selection.rows if ev and ev.selection else []
+                if picks:
+                    pick = tbl.iloc[picks[0]]["Distributor"]
+                    if st.session_state.get("_sc_upl_last") != pick:
+                        st.session_state["_sc_upl_last"] = pick
+                        dfrm, dto = _bounds(sc_start, sc_end)
                         sub = filtered[
-                            filtered[col].astype(str).str.strip()
-                            .replace("", "—") == pick]
+                            (filtered["_dn"] == pick) & filtered["_d"].notna()
+                            & (filtered["_d"] >= dfrm) & (filtered["_d"] <= dto)]
                         drawer.open_drawer(
-                            f"{label} = {pick} — line items",
+                            f"{pick} — During window ({sc_start} → {sc_end})",
                             _kpi_view(sub),
                             subtitle=f"{len(sub):,} rows · "
                                      f"{data.fmt(sub['_q'].sum())} MT ordered",
@@ -1571,14 +1665,7 @@ with tab_sc:
                                      ("Released", data.fmt(sub['_rq'].sum())),
                                      ("Invoiced", data.fmt(sub['_iq'].sum())),
                                      ("Lines", f"{len(sub):,}")],
-                            filename=f"{csv_name.replace('.csv','')}_{pick[:20].replace(' ','_')}.csv")
-
-        _scheme_table("_p2", "Payment Terms",
-                      "ptm", "scheme_payment_terms.csv")
-        _scheme_table("_dl", "Delivery Mode",
-                      "dlm", "scheme_delivery_mode.csv")
-        _scheme_table("_ot", "Order Type",
-                      "ot", "scheme_order_type.csv")
+                            filename=f"scheme_{pick[:20].replace(' ', '_')}.csv")
 
 with tab_ln:
     # ── Line items — searchable table view of filtered rows ────────────────
