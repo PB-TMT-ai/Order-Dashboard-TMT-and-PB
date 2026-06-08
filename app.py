@@ -1016,10 +1016,24 @@ with tab_be:
         # ── BE-vs-Actuals table ─────────────────────────────────────────────
         with st.container(border=True):
             tbl = be_logic.be_table(filtered, ag, now)
+            # Bifurcation columns already on tbl (Retail/Project BE & Act).
+            # Merge last-3-months MoM (split Retail/Project) + Realistic BE auto.
+            mom = be_logic.be_mom(filtered, ag, inv_index)
+            mom_value_cols = [c for c in mom.columns if c != "_distNorm"]
+            tbl = tbl.merge(mom, on="_distNorm", how="left")
+            tbl[mom_value_cols] = tbl[mom_value_cols].fillna(0.0)
+            # Realistic BE (manual override, per distributor, held in session) and
+            # Volume at Risk = BE − Realistic BE(used). Override wins when present.
+            ov_map = st.session_state.setdefault("_be_realistic_override", {})
+            tbl["Realistic BE (override)"] = tbl["_distNorm"].map(ov_map).astype(float)
+            tbl["Realistic BE (used)"] = (
+                tbl["Realistic BE (override)"].fillna(tbl["Realistic BE (auto)"]))
+            tbl["Volume at Risk"] = tbl["BE"] - tbl["Realistic BE (used)"]
             _chart_header(
                 "BE vs Actuals — per distributor",
-                "Retail + Self-stocking + Project-thru-Dist. Includes "
-                "distributors with orders but no BE (BE=0). Click a row to drill in.",
+                "Retail (Retail + Self-stocking) vs Project (thru-Dist), with last "
+                "3 months MoM, Realistic BE (3-mo avg, editable) and Volume at Risk "
+                "(BE − Realistic). Edit the override column; pick a distributor to drill.",
                 csv_df=tbl.drop(columns=["_distNorm", "_hasBE"]),
                 csv_name="be_vs_actuals.csv", key="be_table")
             # Filters
@@ -1034,37 +1048,65 @@ with tab_be:
                 view = view[view["Distributor"].astype(str).str.lower().str.contains(search)]
             if sel_states:
                 view = view[view["State"].isin(sel_states)]
-            # Show table with row selection
-            display_cols = ["Distributor", "State", "BE", "Adjusted BE",
-                            "Actuals", "Absolute gap", "Adjusted gap",
-                            "Pending release", "Pending invoice",
-                            "Pending pipeline"]
-            be_tbl_event = st.dataframe(
-                view[display_cols], use_container_width=True, hide_index=True,
-                height=420, on_select="rerun", selection_mode="single-row",
-                key="be_vs_act_tbl")
-            sel_idx = (be_tbl_event.selection.rows
-                       if be_tbl_event and be_tbl_event.selection else [])
-            if sel_idx:
-                row = view.iloc[sel_idx[0]]
+            view = view.reset_index(drop=True)
+            # Column order. MoM month/bucket cols sit between actuals and Realistic.
+            mom_cols = [c for c in mom_value_cols if c != "Realistic BE (auto)"]
+            editor_cols = (["Distributor", "State", "BE", "Retail BE", "Project BE",
+                            "Adjusted BE", "Actuals", "Retail Act", "Project Act"]
+                           + mom_cols
+                           + ["Realistic BE (auto)", "Realistic BE (override)",
+                              "Realistic BE (used)", "Volume at Risk",
+                              "Pending pipeline"])
+            colcfg = {c: _mt_col(c) for c in editor_cols
+                      if c not in ("Distributor", "State")}
+            colcfg["Realistic BE (override)"] = st.column_config.NumberColumn(
+                "Realistic BE (override)", format="%.0f",
+                help="Type to override the 3-month-average Realistic BE. "
+                     "Blank = use the auto value. Resets on reload.")
+            disabled = [c for c in editor_cols if c != "Realistic BE (override)"]
+            edited = st.data_editor(
+                view[editor_cols], use_container_width=True, hide_index=True,
+                height=460, column_config=colcfg, disabled=disabled,
+                key="be_vs_act_editor")
+            # Persist edited overrides back into the session map; rerun once if
+            # they changed so Realistic-used and Volume-at-Risk refresh.
+            ov_series = edited["Realistic BE (override)"]
+            changed = False
+            for pos, distN in enumerate(view["_distNorm"].values):
+                val = ov_series.iloc[pos]
+                if pd.notna(val):
+                    if ov_map.get(distN) != float(val):
+                        ov_map[distN] = float(val)
+                        changed = True
+                elif distN in ov_map:
+                    del ov_map[distN]
+                    changed = True
+            if changed:
+                st.rerun()
+            # Drill-down via selectbox (data_editor has no row-selection event).
+            picks = ["—"] + view["Distributor"].astype(str).tolist()
+            drill_pick = st.selectbox("Drill into a distributor's orders", picks,
+                                      key="be_drill_pick")
+            if drill_pick and drill_pick != "—":
+                row = view[view["Distributor"].astype(str) == drill_pick].iloc[0]
                 distN = row["_distNorm"]
                 dist_rows = filtered[filtered["_dnN"] == distN]
                 last = st.session_state.get("_be_tbl_last")
-                if distN != last:
-                    st.session_state["_be_tbl_last"] = distN
+                if drill_pick != last:
+                    st.session_state["_be_tbl_last"] = drill_pick
                     drawer.open_drawer(
                         f"{row['Distributor']} — orders",
                         _kpi_view(dist_rows),
                         subtitle=f"{row['State']} · "
                                  f"BE {data.fmt(row['BE'])} · "
-                                 f"AdjBE {data.fmt(row['Adjusted BE'])} · "
-                                 f"Actuals {data.fmt(row['Actuals'])}",
+                                 f"Actuals {data.fmt(row['Actuals'])} · "
+                                 f"VaR {data.fmt(row['Volume at Risk'])}",
                         summary=[("BE", data.fmt(row['BE'])),
-                                 ("Adj BE", data.fmt(row['Adjusted BE'])),
                                  ("Actuals", data.fmt(row['Actuals'])),
-                                 ("Abs gap", data.fmt(row['Absolute gap'])),
-                                 ("Adj gap", data.fmt(row['Adjusted gap'])),
-                                 ("Pipeline", data.fmt(row['Pending pipeline']))],
+                                 ("Retail BE", data.fmt(row['Retail BE'])),
+                                 ("Project BE", data.fmt(row['Project BE'])),
+                                 ("Realistic BE", data.fmt(row['Realistic BE (used)'])),
+                                 ("Vol at Risk", data.fmt(row['Volume at Risk']))],
                         filename=f"{row['Distributor'][:30].replace(' ','_')}_orders.csv")
 
         # ── India gap map (BE tab) ──────────────────────────────────────────

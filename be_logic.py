@@ -131,12 +131,15 @@ def flatten_be_atomic(be_rows: list[dict]) -> list[dict]:
         if row is None:
             row = {"dist": b["distributor"], "distNorm": b["distNorm"],
                    "region": b["region"], "state": b.get("state", ""),
-                   "qty": 0.0}
+                   "qty": 0.0, "retail_be": 0.0, "project_be": 0.0}
             grp[b["distNorm"]] = row
         if not row["state"] and b.get("state"):
             row["state"] = b["state"]
-        row["qty"] += (b.get("retail_fe550", 0) + b.get("retail_fe550d", 0)
-                       + b.get("project_fe550", 0) + b.get("project_fe550d", 0))
+        retail = b.get("retail_fe550", 0) + b.get("retail_fe550d", 0)
+        project = b.get("project_fe550", 0) + b.get("project_fe550d", 0)
+        row["retail_be"] += retail
+        row["project_be"] += project
+        row["qty"] += retail + project
     return [a for a in grp.values() if a["qty"] > 0]
 
 
@@ -147,6 +150,14 @@ def order_cat(row: pd.Series | dict) -> str | None:
     if ot == "Project":
         return "Project-thru-Dist"
     return None
+
+
+def be_bucket(ch: str) -> str:
+    """Map an order channel to a BE bucket: Retail (rt+ss) vs Project (pd).
+
+    Mirrors the BE sheet's 'Retail-PTR' vs 'Distributor-Project' column groups.
+    """
+    return "Retail" if ch in ("rt", "ss") else "Project"
 
 
 def order_grade(row: pd.Series | dict) -> str | None:
@@ -321,6 +332,9 @@ def be_table(df: pd.DataFrame, ag: BeAggregate,
         distN = atom["distNorm"]
         orders = ag.orders_by_key.get(distN, [])
         actuals = sum(o["invQty"] for o in orders)
+        retail_act = sum(o["invQty"] for o in orders
+                         if be_bucket(o["r"]["_ch"]) == "Retail")
+        project_act = float(actuals) - retail_act
         dist_rows = elig[elig["_dnN"] == distN] if len(elig) else elig
         pend_rel = float(dist_rows["_pend"].sum()) if len(dist_rows) else 0.0
         pend_inv = float(dist_rows["_pendInv"].sum()) if len(dist_rows) else 0.0
@@ -331,8 +345,12 @@ def be_table(df: pd.DataFrame, ag: BeAggregate,
             "Distributor": atom["dist"],
             "State": atom.get("state", "") or "—",
             "BE": be_qty,
+            "Retail BE": float(atom.get("retail_be", 0.0)),
+            "Project BE": float(atom.get("project_be", 0.0)),
             "Adjusted BE": adj_be,
             "Actuals": float(actuals),
+            "Retail Act": retail_act,
+            "Project Act": project_act,
             "Absolute gap": float(actuals) - be_qty,
             "Adjusted gap": float(actuals) - adj_be,
             "Pending release": pend_rel,
@@ -351,14 +369,21 @@ def be_table(df: pd.DataFrame, ag: BeAggregate,
         for distN, g in no_be.groupby("_dnN"):
             orders = ag.nobe_orders_by_key.get(distN, [])
             actuals_in_month = float(sum(o["invQty"] for o in orders))
+            retail_act = sum(o["invQty"] for o in orders
+                             if be_bucket(o["r"]["_ch"]) == "Retail")
+            project_act = actuals_in_month - retail_act
             pend_rel = float(g["_pend"].sum())
             pend_inv = float(g["_pendInv"].sum())
             rows.append({
                 "Distributor": cl(g["_dn"].iloc[0]) or "Direct",
                 "State": cl(g["_st"].iloc[0]).title() or "—",
                 "BE": 0.0,
+                "Retail BE": 0.0,
+                "Project BE": 0.0,
                 "Adjusted BE": 0.0,
                 "Actuals": actuals_in_month,
+                "Retail Act": retail_act,
+                "Project Act": project_act,
                 "Absolute gap": actuals_in_month,
                 "Adjusted gap": actuals_in_month,
                 "Pending release": pend_rel,
@@ -371,6 +396,60 @@ def be_table(df: pd.DataFrame, ag: BeAggregate,
     if not len(out):
         return out
     return out.sort_values("BE", ascending=False).reset_index(drop=True)
+
+
+def _month_bounds(y: int, m0: int, offset: int) -> tuple[datetime, datetime, str]:
+    """Bounds + label for the month `offset` months before (y, m0), m0 0-indexed.
+    offset 0 = that month, 1 = prior month, …  Label like \"Jun'26\"."""
+    idx = y * 12 + m0 - offset
+    yy, mm = divmod(idx, 12)  # mm 0-indexed
+    start = datetime(yy, mm + 1, 1)
+    end = ((datetime(yy, mm + 2, 1) if mm < 11 else datetime(yy + 1, 1, 1))
+           - timedelta(seconds=1))
+    return start, end, start.strftime("%b'%y")
+
+
+def be_mom(df: pd.DataFrame, ag: BeAggregate,
+           inv_index: dict[str, InvoiceEntry], months: int = 3) -> pd.DataFrame:
+    """Per-distributor invoiced actuals split Retail/Project for the BE month and
+    the prior (months-1) months, attributed by invoice date.
+
+    Returns a frame keyed by `_distNorm` with columns "<MonLabel> Retail" /
+    "<MonLabel> Project" (most recent month first) plus "Realistic BE (auto)" =
+    mean of each month's total (Retail+Project) actuals.
+    """
+    elig = df[
+        (df["_pt"] == "TMT")
+        & df["_gr"].astype(str).str.lower().str.replace(" ", "", regex=False)
+            .isin(("fe550", "fe550d"))
+        & df["_ch"].isin(["rt", "ss", "pd"])
+    ].copy() if len(df) else df
+
+    be_m0 = ag.be_month_start.month - 1  # 0-indexed
+    be_y = ag.be_month_start.year
+    windows = [_month_bounds(be_y, be_m0, off) for off in range(months)]
+    labels = [w[2] for w in windows]
+    base = {f"{lbl} {b}": 0.0 for lbl in labels for b in ("Retail", "Project")}
+
+    data_map: dict[str, dict] = {}
+    if len(elig):
+        for _, r in elig.iterrows():
+            bucket = be_bucket(r["_ch"])
+            rec = data_map.setdefault(r["_dnN"], dict(base))
+            for start, end, lbl in windows:
+                q = invoiced_in_range(r, start, end, inv_index)
+                if q:
+                    rec[f"{lbl} {bucket}"] += q
+
+    cols = (["_distNorm"]
+            + [f"{lbl} {b}" for lbl in labels for b in ("Retail", "Project")]
+            + ["Realistic BE (auto)"])
+    rows = []
+    for distN, rec in data_map.items():
+        month_tot = [rec[f"{lbl} Retail"] + rec[f"{lbl} Project"] for lbl in labels]
+        realistic = sum(month_tot) / len(month_tot) if month_tot else 0.0
+        rows.append({"_distNorm": distN, **rec, "Realistic BE (auto)": realistic})
+    return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
 
 def be_state_gap(df: pd.DataFrame, ag: BeAggregate, today: datetime,
