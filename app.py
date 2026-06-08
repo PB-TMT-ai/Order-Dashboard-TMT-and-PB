@@ -14,6 +14,8 @@ import pandas as pd
 import streamlit as st
 
 import be_logic
+import be_output
+import customer_logic
 import data
 import drawer
 import plots
@@ -583,9 +585,9 @@ def _chart_header(title: str, subtitle: str, *, csv_df: pd.DataFrame | None = No
 # --------------------------------------------------------------------------- #
 # Tabs
 # --------------------------------------------------------------------------- #
-tab_ov, tab_be, tab_dr, tab_oh, tab_cp, tab_ln = st.tabs(
-    ["Overview", "Vs BE", "Drill-down", "Orders in Hand",
-     "Period compare", "Line items"])
+tab_ov, tab_be, tab_bo, tab_dr, tab_oh, tab_cp, tab_cust, tab_ln = st.tabs(
+    ["Overview", "Vs BE", "BE Output", "Drill-down", "Orders in Hand",
+     "Period compare", "Customers", "Line items"])
 
 with tab_ov:
     # ── Order trend by channel ──────────────────────────────────────────────
@@ -1656,6 +1658,104 @@ with tab_ln:
             csv_df=view, csv_name="line_items.csv", key="ln")
         st.dataframe(view, use_container_width=True, hide_index=True, height=560,
                      column_config=_num_cfg(view))
+
+
+with tab_cust:
+    st.markdown(
+        '<div class="chart-title">Customer buying-pattern analysis</div>'
+        '<div class="chart-sub">Per-customer (distributor / account) behaviour '
+        'across the current sidebar filters. Cancelled orders are excluded.</div>',
+        unsafe_allow_html=True)
+
+    cust_sub = st.tabs(["RFM segments", "Product mix", "Reorder cadence",
+                        "MoM growth"])
+
+    # — RFM —
+    with cust_sub[0]:
+        rfm_tbl = customer_logic.rfm(filtered, now)
+        with st.container(border=True):
+            _chart_header(
+                "RFM — Recency / Frequency / Monetary",
+                "Recency = days since last order · Frequency = distinct orders · "
+                "Monetary = ordered MT. Scores 1–3 (3 = best); segment from R & F.",
+                csv_df=rfm_tbl, csv_name="customer_rfm.csv", key="cust_rfm")
+            if len(rfm_tbl):
+                seg_counts = rfm_tbl["Segment"].value_counts()
+                seg_cards = [
+                    _kpi_card("k-or", "Customers", f"{len(rfm_tbl):,}", "in scope"),
+                    _kpi_card("k-in", "Champions",
+                              f"{int(seg_counts.get('Champion', 0)):,}", "R≥3 & F≥3"),
+                    _kpi_card("k-gap", "At risk / Dormant",
+                              f"{int(seg_counts.get('At risk', 0) + seg_counts.get('Dormant', 0)):,}",
+                              "need attention"),
+                ]
+                st.markdown(
+                    '<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);">'
+                    + "".join(seg_cards) + "</div>", unsafe_allow_html=True)
+            st.dataframe(
+                rfm_tbl, use_container_width=True, hide_index=True, height=460,
+                column_config={
+                    "Recency (days)": _mt_col("Recency (days)"),
+                    "Frequency": _mt_col("Frequency"),
+                    "Monetary (MT)": _mt_col("Monetary (MT)")})
+
+    # — Product mix —
+    with cust_sub[1]:
+        with st.container(border=True):
+            dim_lbl = st.radio("Break down by", ["Grade", "Form", "Channel"],
+                               horizontal=True, key="cust_mix_dim")
+            mix_tbl = customer_logic.mix(filtered, dim_lbl.lower())
+            _chart_header(
+                f"Product mix by {dim_lbl.lower()} — % of each customer's MT",
+                "Total MT plus the share (%) of each customer's ordered volume "
+                f"going to each {dim_lbl.lower()}.",
+                csv_df=mix_tbl, csv_name=f"customer_mix_{dim_lbl.lower()}.csv",
+                key="cust_mix")
+            pct_cols = [c for c in mix_tbl.columns
+                        if c not in ("Customer", "Total MT")]
+            cfg = {"Total MT": _mt_col("Total MT")}
+            cfg.update({c: _pct_col(c) for c in pct_cols})
+            st.dataframe(mix_tbl, use_container_width=True, hide_index=True,
+                         height=460, column_config=cfg)
+
+    # — Reorder cadence / churn —
+    with cust_sub[2]:
+        with st.container(border=True):
+            cad_tbl = customer_logic.cadence(filtered, now)
+            _chart_header(
+                "Reorder cadence & churn risk",
+                "Mean/median gap between orders and a status flag: Dormant "
+                "(no order in 60+ days) / At risk / Active.",
+                csv_df=cad_tbl, csv_name="customer_cadence.csv", key="cust_cad")
+            st.dataframe(
+                cad_tbl, use_container_width=True, hide_index=True, height=460,
+                column_config={
+                    "Orders": _mt_col("Orders"),
+                    "Mean gap (days)": _pct_col("Mean gap (days)"),
+                    "Median gap (days)": _pct_col("Median gap (days)"),
+                    "Recency (days)": _mt_col("Recency (days)"),
+                    "Last order": st.column_config.DateColumn("Last order")})
+
+    # — MoM growth —
+    with cust_sub[3]:
+        with st.container(border=True):
+            mom_tbl = customer_logic.mom_growth(filtered, months=6)
+            _chart_header(
+                "Month-over-month ordered MT (last 6 months)",
+                "Monthly ordered MT per customer; MoM % compares the two most "
+                "recent months. Sort to find fastest growers / decliners.",
+                csv_df=mom_tbl, csv_name="customer_mom.csv", key="cust_mom")
+            st.dataframe(mom_tbl, use_container_width=True, hide_index=True,
+                         height=460, column_config=_num_cfg(
+                             mom_tbl, pct=("MoM %",),
+                             mt_extra=tuple(c for c in mom_tbl.columns
+                                            if c not in ("Customer", "MoM %"))))
+
+
+with tab_bo:
+    be_output.render(filtered, df_cancelled, st.session_state.be_version,
+                     ag, inv_index, now, _mt_col, _pct_col, _chart_header,
+                     _kpi_card)
 
 
 # ─── Universal drill-down drawer (rendered last so it floats above) ──────────
