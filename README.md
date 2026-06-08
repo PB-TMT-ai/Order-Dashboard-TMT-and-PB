@@ -43,7 +43,7 @@ storage_io.py    # Upload/download Excel binaries to Cloudflare R2 (boto3 / S3 A
 
 ## Tabs
 
-`Overview · Vs BE · Drill-down · Orders in Hand · Period compare · Scheme analysis · Line items`
+`Overview · Vs BE · Drill-down · Orders in Hand · Period compare · Line items`
 
 ## Deploy
 
@@ -55,7 +55,6 @@ storage_io.py    # Upload/download Excel binaries to Cloudflare R2 (boto3 / S3 A
 All scaffold `TODO:` extension points have shipped (PRs #5–#9):
 
 - ✅ **Period Compare tab** — two date windows, A-vs-B KPI deltas, per-channel comparison, daily overlay chart
-- ✅ **Scheme Analysis tab** — by Payment Terms / Delivery Mode / Order Type, with CSV + drill
 - ✅ **Drill-down tab** — multi-level dimension picker, Plotly sunburst, pivot table with row drill
 - ✅ **Daily invoice trajectory chart** on the Vs BE tab (clickable to drill a day's invoiced lines)
 - ✅ **Inline drill panel** — right-side slide-over drawer wired to KPI tiles, chart clicks, and table rows

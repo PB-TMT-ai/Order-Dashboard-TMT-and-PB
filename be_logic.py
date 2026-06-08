@@ -12,7 +12,8 @@ from typing import Any
 
 import pandas as pd
 
-from data import InvoiceEntry, MOS, cl, invoiced_in_range, norm_name, num
+from data import (InvoiceEntry, MOS, SHORT_CLOSE_DAYS, cl, invoiced_in_range,
+                  norm_name, num)
 
 
 @dataclass
@@ -231,7 +232,7 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
                     pipe_eff = 0.0
                 elif pd.notna(r["_d"]):
                     days_old = (today - r["_d"]).days
-                    pipe_eff = 0.0 if days_old > 60 else pipe
+                    pipe_eff = 0.0 if days_old > SHORT_CLOSE_DAYS else pipe
                 else:
                     pipe_eff = pipe
         if inv_qty <= 0 and pipe_eff <= 0:

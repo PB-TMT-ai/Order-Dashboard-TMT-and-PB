@@ -387,11 +387,14 @@ st.markdown(_KPI_CSS + '<div class="kpi-row">' + "".join(cards) + "</div>",
 # ─── KPI drill-down buttons (open the right-side drawer) ─────────────────────
 def _kpi_view(rows: pd.DataFrame, extra_cols: list[str] | None = None) -> pd.DataFrame:
     """Standardised line-items view used by every drawer on this page."""
-    cols = ["_d", "_oid", "_dn", "_pt", "_sta", "_st", "_gr", "_dia",
-            "_q", "_rq", "_iq", "_cm"] + (extra_cols or [])
-    return rows[cols].rename(columns={
+    cols = ["_d", "_oid", "_dn", "_pt", "_ot", "_sta", "_st", "_gr", "_fm",
+            "_dia", "_q", "_rq", "_iq", "_cm"] + (extra_cols or [])
+    out = rows[cols].copy()
+    out["_fm"] = out["_fm"].map(plots.form_label)
+    return out.rename(columns={
         "_d": "Date", "_oid": "Order ID", "_dn": "Distributor", "_pt": "Type",
-        "_sta": "Status", "_st": "Ship to", "_gr": "Grade", "_dia": "Dia",
+        "_ot": "Order type", "_sta": "Status", "_st": "Ship to", "_gr": "Grade",
+        "_fm": "Form", "_dia": "Dia",
         "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM"})
 
 
@@ -545,9 +548,9 @@ def _chart_header(title: str, subtitle: str, *, csv_df: pd.DataFrame | None = No
 # --------------------------------------------------------------------------- #
 # Tabs
 # --------------------------------------------------------------------------- #
-tab_ov, tab_be, tab_dr, tab_oh, tab_cp, tab_sc, tab_ln = st.tabs(
+tab_ov, tab_be, tab_dr, tab_oh, tab_cp, tab_ln = st.tabs(
     ["Overview", "Vs BE", "Drill-down", "Orders in Hand",
-     "Period compare", "Scheme analysis", "Line items"])
+     "Period compare", "Line items"])
 
 with tab_ov:
     # ── Order trend by channel ──────────────────────────────────────────────
@@ -1527,147 +1530,6 @@ with tab_cp:
                           yaxis_title="Ordered MT",
                           legend=dict(orientation="h", y=-0.18))
         st.plotly_chart(theme.isolate_on_hover(fig), use_container_width=True)
-
-with tab_sc:
-    # ── Scheme analysis: Before / During / After uplift around a scheme ──────
-    st.markdown(
-        '<div class="chart-title">Scheme analysis</div>'
-        '<div class="chart-sub">Pick a scheme window. Each distributor is '
-        'measured over three equal-length windows — Before, During and After '
-        'the scheme — to show uplift (During vs Before) and whether it was '
-        'sustained (After vs Before).</div>',
-        unsafe_allow_html=True)
-
-    sc_now = datetime.now()
-    sc_def_end = sc_now.date()
-    sc_def_start = (sc_now - timedelta(days=13)).date()
-
-    with st.container(border=True):
-        sc1, sc2, sc3 = st.columns([2, 2, 3])
-        with sc1:
-            sc_start = st.date_input("Scheme start", value=sc_def_start,
-                                     key="sc_start")
-        with sc2:
-            sc_end = st.date_input("Scheme end", value=sc_def_end, key="sc_end")
-        with sc3:
-            sc_metric = st.radio("Metric", ["Ordered", "Invoiced"],
-                                 horizontal=True, key="sc_metric")
-
-    if not len(filtered):
-        st.info("Apply filters in the sidebar to see scheme uplift.")
-    elif sc_end < sc_start:
-        st.warning("Scheme end is before scheme start — adjust the dates.")
-    else:
-        win_len = (sc_end - sc_start).days + 1
-        before_start = sc_start - timedelta(days=win_len)
-        before_end = sc_start - timedelta(days=1)
-        after_start = sc_end + timedelta(days=1)
-        after_end = sc_end + timedelta(days=win_len)
-
-        def _bounds(s, e):
-            return (datetime.combine(s, datetime.min.time()),
-                    datetime.combine(e, datetime.max.time()))
-
-        def _dist_metric(s, e) -> pd.Series:
-            """Per-distributor metric over [s, e]. Ordered = sum _q by order
-            date; Invoiced = proportional invoice-date attribution."""
-            frm, to = _bounds(s, e)
-            if sc_metric == "Invoiced":
-                ser = data.invoiced_in_period(filtered, frm, to, inv_index)
-                return filtered.assign(_v=ser).groupby("_dn")["_v"].sum()
-            d = filtered["_d"]
-            win = filtered[d.notna() & (d >= frm) & (d <= to)]
-            if not len(win):
-                return pd.Series(dtype=float)
-            return win.groupby("_dn")["_q"].sum()
-
-        b_ser = _dist_metric(before_start, before_end)
-        d_ser = _dist_metric(sc_start, sc_end)
-        a_ser = _dist_metric(after_start, after_end)
-
-        names = sorted(set(b_ser.index) | set(d_ser.index) | set(a_ser.index))
-        rows = []
-        for dn in names:
-            bv = float(b_ser.get(dn, 0.0))
-            dv = float(d_ser.get(dn, 0.0))
-            av = float(a_ser.get(dn, 0.0))
-            if bv == 0 and dv == 0 and av == 0:
-                continue
-            rows.append({
-                "Distributor": dn,
-                "Before MT": bv, "During MT": dv, "After MT": av,
-                "Uplift %": ((dv - bv) / bv * 100) if bv > 0 else float("nan"),
-                "Sustained %": ((av - bv) / bv * 100) if bv > 0 else float("nan"),
-            })
-        tbl = pd.DataFrame(rows)
-
-        tot_b = float(b_ser.sum()) if len(b_ser) else 0.0
-        tot_d = float(d_ser.sum()) if len(d_ser) else 0.0
-        tot_a = float(a_ser.sum()) if len(a_ser) else 0.0
-        ov_upl = ((tot_d - tot_b) / tot_b * 100) if tot_b > 0 else 0.0
-        ov_sus = ((tot_a - tot_b) / tot_b * 100) if tot_b > 0 else 0.0
-        upl_cls = "up" if ov_upl >= 0 else "dn"
-
-        sc_cards = [
-            _kpi_card("k-re", f"Before · {win_len}d", data.fmt(tot_b),
-                      f"{before_start} → {before_end}"),
-            _kpi_card("k-in", f"During · {win_len}d", data.fmt(tot_d),
-                      f"{sc_start} → {sc_end}"),
-            _kpi_card("k-inp", f"After · {win_len}d", data.fmt(tot_a),
-                      f"{after_start} → {after_end}"),
-            (f'<div class="kc k-gap"><div class="kl">Overall uplift</div>'
-             f'<div class="kv {upl_cls}">{ov_upl:+.1f}<span class="ku">%</span></div>'
-             f'<div class="ks">During vs Before · sustained {ov_sus:+.1f}%</div>'
-             f'<div class="ch-subs"></div></div>'),
-        ]
-        st.markdown(
-            '<div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">'
-            + "".join(sc_cards) + "</div>", unsafe_allow_html=True)
-        st.caption(
-            f"Metric: {sc_metric} MT · equal {win_len}-day windows. "
-            "Uplift = (During−Before)/Before; Sustained = (After−Before)/Before. "
-            "Blank % when the distributor had zero Before-window activity.")
-
-        with st.container(border=True):
-            _chart_header(
-                f"Per-distributor uplift — {sc_metric} MT",
-                "Click a row to drill into that distributor's During-window "
-                "line items.",
-                csv_df=tbl, csv_name="scheme_uplift.csv", key="sc_upl")
-            if not len(tbl):
-                st.info("No distributor activity in any of the three windows.")
-            else:
-                tbl = tbl.sort_values("During MT", ascending=False)
-                ev = st.dataframe(
-                    tbl, use_container_width=True, hide_index=True, height=420,
-                    on_select="rerun", selection_mode="single-row",
-                    key="sc_upl_tbl",
-                    column_config={
-                        "Before MT": st.column_config.NumberColumn(format="%.0f"),
-                        "During MT": st.column_config.NumberColumn(format="%.0f"),
-                        "After MT": st.column_config.NumberColumn(format="%.0f"),
-                        "Uplift %": st.column_config.NumberColumn(format="%.1f%%"),
-                        "Sustained %": st.column_config.NumberColumn(format="%.1f%%"),
-                    })
-                picks = ev.selection.rows if ev and ev.selection else []
-                if picks:
-                    pick = tbl.iloc[picks[0]]["Distributor"]
-                    if st.session_state.get("_sc_upl_last") != pick:
-                        st.session_state["_sc_upl_last"] = pick
-                        dfrm, dto = _bounds(sc_start, sc_end)
-                        sub = filtered[
-                            (filtered["_dn"] == pick) & filtered["_d"].notna()
-                            & (filtered["_d"] >= dfrm) & (filtered["_d"] <= dto)]
-                        drawer.open_drawer(
-                            f"{pick} — During window ({sc_start} → {sc_end})",
-                            _kpi_view(sub),
-                            subtitle=f"{len(sub):,} rows · "
-                                     f"{data.fmt(sub['_q'].sum())} MT ordered",
-                            summary=[("Ordered", data.fmt(sub['_q'].sum())),
-                                     ("Released", data.fmt(sub['_rq'].sum())),
-                                     ("Invoiced", data.fmt(sub['_iq'].sum())),
-                                     ("Lines", f"{len(sub):,}")],
-                            filename=f"scheme_{pick[:20].replace(' ', '_')}.csv")
 
 with tab_ln:
     # ── Line items — searchable table view of filtered rows ────────────────

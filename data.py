@@ -14,6 +14,10 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+# Short-close rule: a released-pending line older than this many calendar days
+# (and >= 5 MT) is treated as short-closed (pending -> 0). Shared with be_logic.
+SHORT_CLOSE_DAYS = 30
+
 # --- Source column names in the Order sheet (mirror of K{} in the HTML) ---
 K = {
     "date": "Opportunity date",
@@ -317,7 +321,7 @@ def enrich(order_df: pd.DataFrame, inv_index: dict[str, InvoiceEntry],
                         np.maximum(q.values - rq.values - cq.values, 0.0))
     days_old = (today_ts - dt).dt.days
     short_small = (raw_pend > 0) & (raw_pend < 5)
-    short_old = (raw_pend >= 5) & has_date.values & (days_old.values > 60)
+    short_old = (raw_pend >= 5) & has_date.values & (days_old.values > SHORT_CLOSE_DAYS)
     sc_short = short_small | short_old
     pend = np.where(sc_short, 0.0, raw_pend)
     pend_inv = np.maximum(rq.values - iq.values, 0.0)
