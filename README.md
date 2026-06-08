@@ -36,14 +36,24 @@ the app runs without it, just without cross-session/cross-user file sharing.
 ```
 app.py           # Streamlit entry — sidebar filters, tabs, KPI strip, BE tab, line items
 data.py          # Order Excel parsing, enrich, channel classifier, num() with comma-strip
-be_logic.py      # BE Excel parsing, flattenBeAtomic (dist-only), beActualsAgg
+be_logic.py      # BE parsing, flatten_be_atomic (dist-only + retail/project), be_table, be_mom
+be_output.py     # BE Output Report: AOP parsing, order-book accounting, monthly report
+customer_logic.py# Customer analytics: RFM, product mix, reorder cadence/churn, MoM growth
 plots.py         # Plotly: channel trend, top states/distributors, India map, BE trajectory
 storage_io.py    # Upload/download Excel binaries to Cloudflare R2 (boto3 / S3 API)
 ```
 
 ## Tabs
 
-`Overview · Vs BE · Drill-down · Orders in Hand · Period compare · Line items`
+`Overview · Vs BE · BE Output · Drill-down · Orders in Hand · Period compare · Customers · Line items`
+
+- **Vs BE** — per-distributor BE vs actuals, now split Retail (Retail + Self-stocking)
+  vs Project (thru-Dist), with last-3-months MoM, an editable Realistic BE (3-mo avg)
+  and Volume at Risk (BE − Realistic). Cancelled orders are excluded everywhere.
+- **BE Output** — monthly AOP-vs-BE / order-book / invoicing operating report for the
+  loaded BE month (uploads Board & Internal AOP files; Order BE entered manually).
+- **Customers** — RFM segmentation, product mix, reorder cadence/churn, and MoM growth
+  per distributor/account.
 
 ## Deploy
 
