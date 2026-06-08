@@ -1755,7 +1755,8 @@ with tab_cust:
 with tab_bo:
     be_output.render(filtered, df_cancelled, st.session_state.be_version,
                      ag, inv_index, now, _mt_col, _pct_col, _chart_header,
-                     _kpi_card)
+                     _kpi_card, kpi_view=_kpi_view,
+                     open_drawer=drawer.open_drawer)
 
 
 # ─── Universal drill-down drawer (rendered last so it floats above) ──────────

@@ -20,7 +20,7 @@ import pandas as pd
 import streamlit as st
 
 import be_logic
-from data import invoiced_in_range
+from data import cl, invoiced_in_range
 
 # AOP rows that make up the TMT report scope ("all TMT lines").
 _AOP_TMT_ROWS = ("jsw one tmt", "one helix tmt")
@@ -275,9 +275,88 @@ def build_report(filtered: pd.DataFrame, be, ag, inv_index,
     return cols, meta
 
 
+# ── per-distributor report ───────────────────────────────────────────────────
+def build_dist_report(filtered: pd.DataFrame, be, ag, inv_index,
+                      now: datetime, order_be_map: dict) -> tuple[pd.DataFrame, dict]:
+    """Per-distributor BE Output table (same grain as the Vs BE tab).
+
+    One row per distributor that either has BE or has in-scope activity. Every
+    order-book / invoicing figure is computed on that distributor's own scope
+    rows; Order BE is a per-distributor manual override held in session state.
+    Columns mirror the total report: BE, Opening OB, Orders (MTD), invoicing
+    split, Order BE, Closing OB, the two DRRs and last-year same month.
+    """
+    sy, sm = be.month_y, be.month_m + 1            # selected month (1-indexed)
+    m_start = _month_start(sy, sm)
+    m_end = _month_end(sy, sm)
+    asof = min(now, m_end)                          # MTD cut-off
+    scope = _scope(filtered)
+    ly_start, ly_end = _month_start(sy - 1, sm), _month_end(sy - 1, sm)
+
+    days_in_month = calendar.monthrange(sy, sm)[1]
+    days_elapsed = max(1, min(days_in_month, (asof.date() - m_start.date()).days + 1))
+    rem_days = max(0, days_in_month - days_elapsed)
+
+    groups = dict(tuple(scope.groupby("_dnN"))) if len(scope) else {}
+    dist_ns = set(ag.atom_lookup) | set(groups)
+    empty = scope.iloc[0:0]
+
+    rows: list[dict] = []
+    for distN in dist_ns:
+        atom = ag.atom_lookup.get(distN)
+        g = groups.get(distN, empty)
+        be_qty = float(atom["qty"]) if atom else 0.0
+        if atom:
+            name, state = atom["dist"], (atom.get("state") or "—")
+        elif len(g):
+            name = cl(g["_dn"].iloc[0]) or "Direct"
+            state = cl(g["_st"].iloc[0]).title() or "—"
+        else:
+            name, state = distN, "—"
+
+        opening = opening_book(g, m_start, inv_index) if len(g) else 0.0
+        orders = orders_booked(g, m_start, asof) if len(g) else 0.0
+        from_open, from_cur = (invoiced_split(g, m_start, asof, inv_index)
+                               if len(g) else (0.0, 0.0))
+        inv_mtd = from_open + from_cur
+        ly = total_invoiced(g, ly_start, ly_end, inv_index) if len(g) else 0.0
+        order_be = float(order_be_map.get(distN, 0.0))
+
+        rows.append({
+            "Distributor": name,
+            "State": state,
+            "BE": be_qty,
+            "Opening OB": opening,
+            "Orders (MTD)": orders,
+            "Inv from Opening": from_open,
+            "Inv from Current": from_cur,
+            "Inv MTD": inv_mtd,
+            "Order BE (override)": order_be,
+            "Closing OB": opening + order_be - be_qty,
+            "Invoice DRR req": (be_qty - inv_mtd) / rem_days if rem_days > 0 else 0.0,
+            "Order DRR req": (order_be - orders) / rem_days if rem_days > 0 else 0.0,
+            "LY same month": ly,
+            "_distNorm": distN,
+            "_hasBE": atom is not None,
+        })
+
+    cols = ["Distributor", "State", "BE", "Opening OB", "Orders (MTD)",
+            "Inv from Opening", "Inv from Current", "Inv MTD",
+            "Order BE (override)", "Closing OB", "Invoice DRR req",
+            "Order DRR req", "LY same month", "_distNorm", "_hasBE"]
+    out = pd.DataFrame(rows, columns=cols)
+    if len(out):
+        out = out.sort_values("BE", ascending=False).reset_index(drop=True)
+    meta = {"month_label": be.month_label, "days_in_month": days_in_month,
+            "days_elapsed": days_elapsed, "rem_days": rem_days,
+            "scope_rows": len(scope)}
+    return out, meta
+
+
 # ── render ───────────────────────────────────────────────────────────────────
 def render(filtered, df_cancelled, be, ag, inv_index, now,
-           mt_col, pct_col, chart_header, kpi_card) -> None:
+           mt_col, pct_col, chart_header, kpi_card,
+           kpi_view=None, open_drawer=None) -> None:
     st.markdown(
         '<div class="chart-title">BE Output Report</div>'
         '<div class="chart-sub">Monthly AOP-vs-BE, order book and invoicing for '
@@ -325,6 +404,10 @@ def render(filtered, df_cancelled, be, ag, inv_index, now,
         st.dataframe(report_df, use_container_width=True, hide_index=True,
                      column_config=cfg)
 
+    # ── Per-distributor BE Output (same grain as the Vs BE tab) ───────────────
+    _render_dist_table(filtered, be, ag, inv_index, now, meta,
+                       mt_col, chart_header, kpi_view, open_drawer)
+
     # Item-5 trio at report (total) level.
     with st.container(border=True):
         mom = be_logic.be_mom(filtered, ag, inv_index)
@@ -355,6 +438,95 @@ def render(filtered, df_cancelled, be, ag, inv_index, now,
         st.markdown(
             '<div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">'
             + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
+def _render_dist_table(filtered, be, ag, inv_index, now, meta,
+                       mt_col, chart_header, kpi_view, open_drawer) -> None:
+    """Per-distributor table with an editable Order BE column + drill-down,
+    mirroring the Vs BE tab's BE-vs-Actuals editor."""
+    with st.container(border=True):
+        ov_map = st.session_state.setdefault("_bo_order_be_map", {})
+        tbl, _ = build_dist_report(filtered, be, ag, inv_index, now, ov_map)
+        chart_header(
+            "BE Output — per distributor",
+            "Opening order book, MTD orders & invoicing split, Closing OB and the "
+            "Invoice/Order DRR required to hit BE — per distributor. Edit Order BE "
+            "(override) to drive Closing OB and Order DRR; pick a distributor to drill.",
+            csv_df=tbl.drop(columns=["_distNorm", "_hasBE"]),
+            csv_name="be_output_by_distributor.csv", key="bo_dist_table")
+
+        if not len(tbl):
+            st.info("No in-scope distributors for this BE month yet.")
+            return
+
+        fc1, fc2 = st.columns([2, 3])
+        search = fc1.text_input("Search distributor", "",
+                                key="bo_tbl_search").strip().lower()
+        states = sorted(s for s in tbl["State"].unique() if s and s != "—")
+        sel_states = fc2.multiselect("State filter", states, default=[],
+                                     key="bo_tbl_states")
+        view = tbl.copy()
+        if search:
+            view = view[view["Distributor"].astype(str).str.lower().str.contains(search)]
+        if sel_states:
+            view = view[view["State"].isin(sel_states)]
+        view = view.reset_index(drop=True)
+
+        editor_cols = ["Distributor", "State", "BE", "Opening OB", "Orders (MTD)",
+                       "Inv from Opening", "Inv from Current", "Inv MTD",
+                       "Order BE (override)", "Closing OB", "Invoice DRR req",
+                       "Order DRR req", "LY same month"]
+        colcfg = {c: mt_col(c) for c in editor_cols if c not in ("Distributor", "State")}
+        colcfg["Order BE (override)"] = st.column_config.NumberColumn(
+            "Order BE (override)", format="%.0f",
+            help="Per-distributor Order BE for the month. Drives Closing OB "
+                 "(Opening + Order BE − BE) and Order DRR. Resets on reload.")
+        disabled = [c for c in editor_cols if c != "Order BE (override)"]
+        edited = st.data_editor(
+            view[editor_cols], use_container_width=True, hide_index=True,
+            height=460, column_config=colcfg, disabled=disabled,
+            key="bo_dist_editor")
+
+        # Persist edited Order BE back into the session map; rerun once on change
+        # so Closing OB / Order DRR refresh.
+        ov_series = edited["Order BE (override)"]
+        changed = False
+        for pos, distN in enumerate(view["_distNorm"].values):
+            val = ov_series.iloc[pos]
+            new = float(val) if pd.notna(val) else 0.0
+            if new > 0:
+                if ov_map.get(distN) != new:
+                    ov_map[distN] = new
+                    changed = True
+            elif distN in ov_map:
+                del ov_map[distN]
+                changed = True
+        if changed:
+            st.rerun()
+
+        # Drill-down to the shared drawer (matches the Vs BE tab).
+        if kpi_view is None or open_drawer is None:
+            return
+        picks = ["—"] + view["Distributor"].astype(str).tolist()
+        drill_pick = st.selectbox("Drill into a distributor's orders", picks,
+                                  key="bo_drill_pick")
+        if drill_pick and drill_pick != "—":
+            row = view[view["Distributor"].astype(str) == drill_pick].iloc[0]
+            dist_rows = filtered[filtered["_dnN"] == row["_distNorm"]]
+            if drill_pick != st.session_state.get("_bo_tbl_last"):
+                st.session_state["_bo_tbl_last"] = drill_pick
+                open_drawer(
+                    f"{row['Distributor']} — orders", kpi_view(dist_rows),
+                    subtitle=f"{row['State']} · BE {row['BE']:,.0f} · "
+                             f"Inv MTD {row['Inv MTD']:,.0f} · "
+                             f"Closing OB {row['Closing OB']:,.0f}",
+                    summary=[("BE", f"{row['BE']:,.0f}"),
+                             ("Opening OB", f"{row['Opening OB']:,.0f}"),
+                             ("Orders MTD", f"{row['Orders (MTD)']:,.0f}"),
+                             ("Inv MTD", f"{row['Inv MTD']:,.0f}"),
+                             ("Order BE", f"{row['Order BE (override)']:,.0f}"),
+                             ("Closing OB", f"{row['Closing OB']:,.0f}")],
+                    filename=f"{str(row['Distributor'])[:30].replace(' ', '_')}_orders.csv")
 
 
 def _load_aop(upload, cache_key: str) -> dict:

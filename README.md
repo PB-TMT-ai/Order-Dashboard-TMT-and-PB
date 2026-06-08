@@ -52,6 +52,9 @@ storage_io.py    # Upload/download Excel binaries to Cloudflare R2 (boto3 / S3 A
   and Volume at Risk (BE − Realistic). Cancelled orders are excluded everywhere.
 - **BE Output** — monthly AOP-vs-BE / order-book / invoicing operating report for the
   loaded BE month (uploads Board & Internal AOP files; Order BE entered manually).
+  Includes a **per-distributor table** (same grain as Vs BE) with Opening/Closing OB,
+  MTD orders & invoicing split, Invoice/Order DRR, an editable per-distributor Order BE,
+  search/state filters and drill-down to the line-item drawer.
 - **Customers** — RFM segmentation, product mix, reorder cadence/churn, and MoM growth
   per distributor/account.
 
