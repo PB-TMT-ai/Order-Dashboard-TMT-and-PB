@@ -361,7 +361,7 @@ def render(filtered, df_cancelled, be, ag, inv_index, now,
         '<div class="chart-title">BE Output Report</div>'
         '<div class="chart-sub">Monthly AOP-vs-BE, order book and invoicing for '
         'the loaded BE month. Scope: TMT + Fe 550/550D + Retail / Self-stocking '
-        '/ Project-thru-Dist. Cancelled orders excluded.</div>',
+        '/ Project-thru-Dist. Rejected/cancelled qty netted out.</div>',
         unsafe_allow_html=True)
 
     if ag is None or be is None:

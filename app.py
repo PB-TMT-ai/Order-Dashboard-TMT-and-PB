@@ -219,12 +219,12 @@ if df is None or not len(df):
             "(and an **Invoice** sheet if present) and builds all metrics.")
     st.stop()
 
-# Item 7: cancelled orders are tracked separately and globally excluded from
-# every order metric/view (Ordered MT, order book, BE actuals, drill-downs, …).
-# The full cancelled frame is kept for the dedicated KPI card below.
-_cancel_mask = df["_sta"].astype(str).str.strip().str.casefold() == "cancelled"
-df_cancelled = df[_cancel_mask].copy()
-df = df[~_cancel_mask].copy()
+# Item 7 (refined): "cancelled" = the rejected/cancelled QUANTITY (the
+# 'total cancelled qty' column), NOT the order-status flag. That quantity is
+# netted out of the active order qty at enrichment (data._q = gross − cancelled),
+# so it is already excluded from every order metric/view. Lines that carry a
+# cancelled qty are kept here for the dedicated KPI card / detail drawer.
+df_cancelled = df[df["_cq"] > 0].copy()
 
 # Restore the last-saved BE once per session (after order data is available)
 if (st.session_state.be_version is None and not st.session_state.be_restore_tried
@@ -404,8 +404,9 @@ cards = [
               _pct(kpis.invoiced), _ch_subs(kpis.ch_in)),
     _kpi_card("k-inp", "Invoiced in period ⓘ", data.fmt(inv_in_period),
               period["label"] if period else "All time", _ch_subs(ch_inp)),
-    _kpi_card("k-canc", "Cancelled", data.fmt(float(cancelled_view["_q"].sum())),
-              f"{len(cancelled_view):,} line items · excluded from all metrics"),
+    _kpi_card("k-canc", "Cancelled (rejected qty)",
+              data.fmt(float(cancelled_view["_cq"].sum())),
+              f"{len(cancelled_view):,} order lines · netted out of all metrics"),
 ]
 if ag:
     gap = ag.matched_act - ag.tot_be  # negative ⇒ behind plan
@@ -425,14 +426,15 @@ st.markdown(_KPI_CSS + '<div class="kpi-row">' + "".join(cards) + "</div>",
 def _kpi_view(rows: pd.DataFrame, extra_cols: list[str] | None = None) -> pd.DataFrame:
     """Standardised line-items view used by every drawer on this page."""
     cols = ["_d", "_oid", "_dn", "_pt", "_ot", "_sta", "_st", "_gr", "_fm",
-            "_dia", "_q", "_rq", "_iq", "_cm"] + (extra_cols or [])
+            "_dia", "_q", "_rq", "_iq", "_cq", "_cm"] + (extra_cols or [])
     out = rows[cols].copy()
     out["_fm"] = out["_fm"].map(plots.form_label)
     return out.rename(columns={
         "_d": "Date", "_oid": "Order ID", "_dn": "Distributor", "_pt": "Type",
         "_ot": "Order type", "_sta": "Status", "_st": "Ship to", "_gr": "Grade",
         "_fm": "Form", "_dia": "Dia",
-        "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM"})
+        "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cq": "Cancel MT",
+        "_cm": "CM"})
 
 
 _kpi_btn_cols = st.columns(5)
@@ -1664,7 +1666,7 @@ with tab_cust:
     st.markdown(
         '<div class="chart-title">Customer buying-pattern analysis</div>'
         '<div class="chart-sub">Per-customer (distributor / account) behaviour '
-        'across the current sidebar filters. Cancelled orders are excluded.</div>',
+        'across the current sidebar filters. Rejected/cancelled qty is netted out.</div>',
         unsafe_allow_html=True)
 
     cust_sub = st.tabs(["RFM segments", "Product mix", "Reorder cadence",

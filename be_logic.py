@@ -235,17 +235,18 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
         # actuals still reconcile with the invoiced figure for this scope.
         has_be = r["_dnN"] in dist_has_be
         inv_qty = invoiced_in_range(r, be_month_start, be_month_end, inv_index)
+        # _q is net of the rejected/cancelled qty already, so pipeline is just
+        # the un-invoiced remainder (order status is not consulted).
         pipe_eff = 0.0
-        if r["_sta"] != "Cancelled":
-            pipe = max(r["_q"] - r["_iq"], 0.0)
-            if pipe > 0:
-                if pipe < 5:
-                    pipe_eff = 0.0
-                elif pd.notna(r["_d"]):
-                    days_old = (today - r["_d"]).days
-                    pipe_eff = 0.0 if days_old > SHORT_CLOSE_DAYS else pipe
-                else:
-                    pipe_eff = pipe
+        pipe = max(r["_q"] - r["_iq"], 0.0)
+        if pipe > 0:
+            if pipe < 5:
+                pipe_eff = 0.0
+            elif pd.notna(r["_d"]):
+                days_old = (today - r["_d"]).days
+                pipe_eff = 0.0 if days_old > SHORT_CLOSE_DAYS else pipe
+            else:
+                pipe_eff = pipe
         if inv_qty <= 0 and pipe_eff <= 0:
             continue
         entry = {"r": r, "invQty": inv_qty, "pipe": pipe_eff}
