@@ -337,6 +337,29 @@ def _ch_subs(ch: dict) -> str:
         for lbl, k in _CH_ROWS)
 
 
+def _mt_col(label: str, **kw):
+    """st.dataframe column config for an MT value — 0 decimals."""
+    return st.column_config.NumberColumn(label, format="%.0f", **kw)
+
+
+def _pct_col(label: str, **kw):
+    """st.dataframe column config for a percentage — max 1 decimal."""
+    return st.column_config.NumberColumn(label, format="%.1f", **kw)
+
+
+def _num_cfg(dfv: pd.DataFrame, pct: tuple = (), mt_extra: tuple = ()) -> dict:
+    """Auto column_config: columns ending in 'MT'/'(MT)' (or in mt_extra) get
+    0 decimals; columns containing '%' (or in pct) get 1 decimal."""
+    cfg: dict = {}
+    for c in dfv.columns:
+        s = str(c)
+        if s in pct or "%" in s:
+            cfg[c] = _pct_col(s)
+        elif s in mt_extra or s.endswith("MT") or s.endswith("(MT)"):
+            cfg[c] = _mt_col(s)
+    return cfg
+
+
 def _kpi_card(cls: str, label: str, value: str, sub: str,
               ch_html: str = "", value_cls: str = "") -> str:
     return (
@@ -1245,7 +1268,7 @@ with tab_dr:
             drill_event = st.dataframe(
                 piv, use_container_width=True, hide_index=True, height=460,
                 on_select="rerun", selection_mode="single-row",
-                key="drill_tbl")
+                column_config=_num_cfg(piv), key="drill_tbl")
             sel = (drill_event.selection.rows
                    if drill_event and drill_event.selection else [])
             if sel:
@@ -1361,11 +1384,12 @@ with tab_oh:
                 "Pending pipeline by distributor",
                 "Largest outstanding pipelines first. Click a row to drill in.",
                 csv_df=by_dn, csv_name="oh_by_distributor.csv", key="oh_by_dn")
+            oh_tbl = by_dn[["Distributor", "Pipeline MT", "Pending release MT",
+                            "Pending invoice MT", "Pending lines", "Avg age (days)"]]
             oh_ev = st.dataframe(
-                by_dn[["Distributor", "Pipeline MT", "Pending release MT",
-                       "Pending invoice MT", "Pending lines", "Avg age (days)"]],
-                use_container_width=True, hide_index=True, height=420,
+                oh_tbl, use_container_width=True, hide_index=True, height=420,
                 on_select="rerun", selection_mode="single-row",
+                column_config=_num_cfg(oh_tbl, mt_extra=("Avg age (days)",)),
                 key="oh_dn_tbl")
             sel = (oh_ev.selection.rows
                    if oh_ev and oh_ev.selection else [])
@@ -1506,7 +1530,8 @@ with tab_cp:
             "Per-channel comparison",
             "Side-by-side Ordered MT across windows for each channel.",
             csv_df=ch_df, csv_name="period_compare_channels.csv", key="cp_ch")
-        st.dataframe(ch_df, use_container_width=True, hide_index=True)
+        st.dataframe(ch_df, use_container_width=True, hide_index=True,
+                     column_config=_num_cfg(ch_df))
 
     # Overlay daily trend
     with st.container(border=True):
@@ -1565,11 +1590,13 @@ with tab_ln:
         unsafe_allow_html=True)
 
     with st.container(border=True):
-        cols_to_show = ["_d", "_oid", "_dn", "_pt", "_sta", "_st", "_gr",
+        cols_to_show = ["_d", "_oid", "_dn", "_pt", "_ot", "_sta", "_st", "_gr",
                         "_dia", "_fm", "_q", "_rq", "_iq", "_cm"]
-        view = filtered[cols_to_show].rename(columns={
+        view = filtered[cols_to_show].copy()
+        view["_fm"] = view["_fm"].map(plots.form_label)
+        view = view.rename(columns={
             "_d": "Date", "_oid": "Order ID", "_dn": "Distributor",
-            "_pt": "Type", "_sta": "Status", "_st": "Ship to",
+            "_pt": "Type", "_ot": "Order type", "_sta": "Status", "_st": "Ship to",
             "_gr": "Grade", "_dia": "Dia", "_fm": "Form",
             "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM"})
         search = st.text_input(
@@ -1585,7 +1612,8 @@ with tab_ln:
             f"{len(view):,} of {len(filtered):,} rows",
             f"Filter: {search!r}" if search else "All rows passing the sidebar filters.",
             csv_df=view, csv_name="line_items.csv", key="ln")
-        st.dataframe(view, use_container_width=True, hide_index=True, height=560)
+        st.dataframe(view, use_container_width=True, hide_index=True, height=560,
+                     column_config=_num_cfg(view))
 
 
 # ─── Universal drill-down drawer (rendered last so it floats above) ──────────
