@@ -128,7 +128,8 @@ def _pie(df: pd.DataFrame, label_col: str, value_col: str, n: int = 10) -> go.Fi
         labels=short_labels, values=agg[value_col], hole=0.55,
         marker=dict(line=dict(color="#FFFFFF", width=2)),
         textfont=dict(size=11),
-        hovertemplate="<b>%{label}</b><br>%{value:,.0f} MT (%{percent})<extra></extra>",
+        texttemplate="%{percent:.1%}",
+        hovertemplate="<b>%{label}</b><br>%{value:,.0f} MT (%{percent:.1%})<extra></extra>",
     )
     # Legend below the donut (horizontal) so the chart gets the full width
     # even when there are many long category labels (e.g. plant names).

@@ -14,6 +14,8 @@ import pandas as pd
 import streamlit as st
 
 import be_logic
+import be_output
+import customer_logic
 import data
 import drawer
 import plots
@@ -217,6 +219,13 @@ if df is None or not len(df):
             "(and an **Invoice** sheet if present) and builds all metrics.")
     st.stop()
 
+# Item 7: cancelled orders are tracked separately and globally excluded from
+# every order metric/view (Ordered MT, order book, BE actuals, drill-downs, …).
+# The full cancelled frame is kept for the dedicated KPI card below.
+_cancel_mask = df["_sta"].astype(str).str.strip().str.casefold() == "cancelled"
+df_cancelled = df[_cancel_mask].copy()
+df = df[~_cancel_mask].copy()
+
 # Restore the last-saved BE once per session (after order data is available)
 if (st.session_state.be_version is None and not st.session_state.be_restore_tried
         and storage.is_configured()):
@@ -275,6 +284,8 @@ def build_filters(df: pd.DataFrame) -> dict:
 
 f = build_filters(df)
 filtered = data.apply_filters(df, f)
+# Cancelled orders in the current sidebar scope (for the KPI card).
+cancelled_view = data.apply_filters(df_cancelled, f)
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +305,7 @@ _KPI_CSS = """
 .kc.k-in{border-left-color:#10B981}
 .kc.k-inp{border-left-color:#0EA5E9}
 .kc.k-gap{border-left-color:#ED1C24}
+.kc.k-canc{border-left-color:#64748B}
 .kl{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;
     letter-spacing:.5px;margin-bottom:4px}
 .kgaplbl{font-weight:400;color:#94A3B8;font-size:10px;text-transform:none;
@@ -325,6 +337,29 @@ def _ch_subs(ch: dict) -> str:
     return "".join(
         f'<div class="ch-sub"><span>{lbl}</span><b>{data.fmt(ch.get(k, 0))}</b></div>'
         for lbl, k in _CH_ROWS)
+
+
+def _mt_col(label: str, **kw):
+    """st.dataframe column config for an MT value — 0 decimals."""
+    return st.column_config.NumberColumn(label, format="%.0f", **kw)
+
+
+def _pct_col(label: str, **kw):
+    """st.dataframe column config for a percentage — max 1 decimal."""
+    return st.column_config.NumberColumn(label, format="%.1f", **kw)
+
+
+def _num_cfg(dfv: pd.DataFrame, pct: tuple = (), mt_extra: tuple = ()) -> dict:
+    """Auto column_config: columns ending in 'MT'/'(MT)' (or in mt_extra) get
+    0 decimals; columns containing '%' (or in pct) get 1 decimal."""
+    cfg: dict = {}
+    for c in dfv.columns:
+        s = str(c)
+        if s in pct or "%" in s:
+            cfg[c] = _pct_col(s)
+        elif s in mt_extra or s.endswith("MT") or s.endswith("(MT)"):
+            cfg[c] = _mt_col(s)
+    return cfg
 
 
 def _kpi_card(cls: str, label: str, value: str, sub: str,
@@ -369,6 +404,8 @@ cards = [
               _pct(kpis.invoiced), _ch_subs(kpis.ch_in)),
     _kpi_card("k-inp", "Invoiced in period ⓘ", data.fmt(inv_in_period),
               period["label"] if period else "All time", _ch_subs(ch_inp)),
+    _kpi_card("k-canc", "Cancelled", data.fmt(float(cancelled_view["_q"].sum())),
+              f"{len(cancelled_view):,} line items · excluded from all metrics"),
 ]
 if ag:
     gap = ag.matched_act - ag.tot_be  # negative ⇒ behind plan
@@ -387,11 +424,14 @@ st.markdown(_KPI_CSS + '<div class="kpi-row">' + "".join(cards) + "</div>",
 # ─── KPI drill-down buttons (open the right-side drawer) ─────────────────────
 def _kpi_view(rows: pd.DataFrame, extra_cols: list[str] | None = None) -> pd.DataFrame:
     """Standardised line-items view used by every drawer on this page."""
-    cols = ["_d", "_oid", "_dn", "_pt", "_sta", "_st", "_gr", "_dia",
-            "_q", "_rq", "_iq", "_cm"] + (extra_cols or [])
-    return rows[cols].rename(columns={
+    cols = ["_d", "_oid", "_dn", "_pt", "_ot", "_sta", "_st", "_gr", "_fm",
+            "_dia", "_q", "_rq", "_iq", "_cm"] + (extra_cols or [])
+    out = rows[cols].copy()
+    out["_fm"] = out["_fm"].map(plots.form_label)
+    return out.rename(columns={
         "_d": "Date", "_oid": "Order ID", "_dn": "Distributor", "_pt": "Type",
-        "_sta": "Status", "_st": "Ship to", "_gr": "Grade", "_dia": "Dia",
+        "_ot": "Order type", "_sta": "Status", "_st": "Ship to", "_gr": "Grade",
+        "_fm": "Form", "_dia": "Dia",
         "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM"})
 
 
@@ -545,9 +585,9 @@ def _chart_header(title: str, subtitle: str, *, csv_df: pd.DataFrame | None = No
 # --------------------------------------------------------------------------- #
 # Tabs
 # --------------------------------------------------------------------------- #
-tab_ov, tab_be, tab_dr, tab_oh, tab_cp, tab_sc, tab_ln = st.tabs(
-    ["Overview", "Vs BE", "Drill-down", "Orders in Hand",
-     "Period compare", "Scheme analysis", "Line items"])
+tab_ov, tab_be, tab_bo, tab_dr, tab_oh, tab_cp, tab_cust, tab_ln = st.tabs(
+    ["Overview", "Vs BE", "BE Output", "Drill-down", "Orders in Hand",
+     "Period compare", "Customers", "Line items"])
 
 with tab_ov:
     # ── Order trend by channel ──────────────────────────────────────────────
@@ -978,10 +1018,24 @@ with tab_be:
         # ── BE-vs-Actuals table ─────────────────────────────────────────────
         with st.container(border=True):
             tbl = be_logic.be_table(filtered, ag, now)
+            # Bifurcation columns already on tbl (Retail/Project BE & Act).
+            # Merge last-3-months MoM (split Retail/Project) + Realistic BE auto.
+            mom = be_logic.be_mom(filtered, ag, inv_index)
+            mom_value_cols = [c for c in mom.columns if c != "_distNorm"]
+            tbl = tbl.merge(mom, on="_distNorm", how="left")
+            tbl[mom_value_cols] = tbl[mom_value_cols].fillna(0.0)
+            # Realistic BE (manual override, per distributor, held in session) and
+            # Volume at Risk = BE − Realistic BE(used). Override wins when present.
+            ov_map = st.session_state.setdefault("_be_realistic_override", {})
+            tbl["Realistic BE (override)"] = tbl["_distNorm"].map(ov_map).astype(float)
+            tbl["Realistic BE (used)"] = (
+                tbl["Realistic BE (override)"].fillna(tbl["Realistic BE (auto)"]))
+            tbl["Volume at Risk"] = tbl["BE"] - tbl["Realistic BE (used)"]
             _chart_header(
                 "BE vs Actuals — per distributor",
-                "Retail + Self-stocking + Project-thru-Dist. Includes "
-                "distributors with orders but no BE (BE=0). Click a row to drill in.",
+                "Retail (Retail + Self-stocking) vs Project (thru-Dist), with last "
+                "3 months MoM, Realistic BE (3-mo avg, editable) and Volume at Risk "
+                "(BE − Realistic). Edit the override column; pick a distributor to drill.",
                 csv_df=tbl.drop(columns=["_distNorm", "_hasBE"]),
                 csv_name="be_vs_actuals.csv", key="be_table")
             # Filters
@@ -996,37 +1050,65 @@ with tab_be:
                 view = view[view["Distributor"].astype(str).str.lower().str.contains(search)]
             if sel_states:
                 view = view[view["State"].isin(sel_states)]
-            # Show table with row selection
-            display_cols = ["Distributor", "State", "BE", "Adjusted BE",
-                            "Actuals", "Absolute gap", "Adjusted gap",
-                            "Pending release", "Pending invoice",
-                            "Pending pipeline"]
-            be_tbl_event = st.dataframe(
-                view[display_cols], use_container_width=True, hide_index=True,
-                height=420, on_select="rerun", selection_mode="single-row",
-                key="be_vs_act_tbl")
-            sel_idx = (be_tbl_event.selection.rows
-                       if be_tbl_event and be_tbl_event.selection else [])
-            if sel_idx:
-                row = view.iloc[sel_idx[0]]
+            view = view.reset_index(drop=True)
+            # Column order. MoM month/bucket cols sit between actuals and Realistic.
+            mom_cols = [c for c in mom_value_cols if c != "Realistic BE (auto)"]
+            editor_cols = (["Distributor", "State", "BE", "Retail BE", "Project BE",
+                            "Adjusted BE", "Actuals", "Retail Act", "Project Act"]
+                           + mom_cols
+                           + ["Realistic BE (auto)", "Realistic BE (override)",
+                              "Realistic BE (used)", "Volume at Risk",
+                              "Pending pipeline"])
+            colcfg = {c: _mt_col(c) for c in editor_cols
+                      if c not in ("Distributor", "State")}
+            colcfg["Realistic BE (override)"] = st.column_config.NumberColumn(
+                "Realistic BE (override)", format="%.0f",
+                help="Type to override the 3-month-average Realistic BE. "
+                     "Blank = use the auto value. Resets on reload.")
+            disabled = [c for c in editor_cols if c != "Realistic BE (override)"]
+            edited = st.data_editor(
+                view[editor_cols], use_container_width=True, hide_index=True,
+                height=460, column_config=colcfg, disabled=disabled,
+                key="be_vs_act_editor")
+            # Persist edited overrides back into the session map; rerun once if
+            # they changed so Realistic-used and Volume-at-Risk refresh.
+            ov_series = edited["Realistic BE (override)"]
+            changed = False
+            for pos, distN in enumerate(view["_distNorm"].values):
+                val = ov_series.iloc[pos]
+                if pd.notna(val):
+                    if ov_map.get(distN) != float(val):
+                        ov_map[distN] = float(val)
+                        changed = True
+                elif distN in ov_map:
+                    del ov_map[distN]
+                    changed = True
+            if changed:
+                st.rerun()
+            # Drill-down via selectbox (data_editor has no row-selection event).
+            picks = ["—"] + view["Distributor"].astype(str).tolist()
+            drill_pick = st.selectbox("Drill into a distributor's orders", picks,
+                                      key="be_drill_pick")
+            if drill_pick and drill_pick != "—":
+                row = view[view["Distributor"].astype(str) == drill_pick].iloc[0]
                 distN = row["_distNorm"]
                 dist_rows = filtered[filtered["_dnN"] == distN]
                 last = st.session_state.get("_be_tbl_last")
-                if distN != last:
-                    st.session_state["_be_tbl_last"] = distN
+                if drill_pick != last:
+                    st.session_state["_be_tbl_last"] = drill_pick
                     drawer.open_drawer(
                         f"{row['Distributor']} — orders",
                         _kpi_view(dist_rows),
                         subtitle=f"{row['State']} · "
                                  f"BE {data.fmt(row['BE'])} · "
-                                 f"AdjBE {data.fmt(row['Adjusted BE'])} · "
-                                 f"Actuals {data.fmt(row['Actuals'])}",
+                                 f"Actuals {data.fmt(row['Actuals'])} · "
+                                 f"VaR {data.fmt(row['Volume at Risk'])}",
                         summary=[("BE", data.fmt(row['BE'])),
-                                 ("Adj BE", data.fmt(row['Adjusted BE'])),
                                  ("Actuals", data.fmt(row['Actuals'])),
-                                 ("Abs gap", data.fmt(row['Absolute gap'])),
-                                 ("Adj gap", data.fmt(row['Adjusted gap'])),
-                                 ("Pipeline", data.fmt(row['Pending pipeline']))],
+                                 ("Retail BE", data.fmt(row['Retail BE'])),
+                                 ("Project BE", data.fmt(row['Project BE'])),
+                                 ("Realistic BE", data.fmt(row['Realistic BE (used)'])),
+                                 ("Vol at Risk", data.fmt(row['Volume at Risk']))],
                         filename=f"{row['Distributor'][:30].replace(' ','_')}_orders.csv")
 
         # ── India gap map (BE tab) ──────────────────────────────────────────
@@ -1230,7 +1312,7 @@ with tab_dr:
             drill_event = st.dataframe(
                 piv, use_container_width=True, hide_index=True, height=460,
                 on_select="rerun", selection_mode="single-row",
-                key="drill_tbl")
+                column_config=_num_cfg(piv), key="drill_tbl")
             sel = (drill_event.selection.rows
                    if drill_event and drill_event.selection else [])
             if sel:
@@ -1346,11 +1428,12 @@ with tab_oh:
                 "Pending pipeline by distributor",
                 "Largest outstanding pipelines first. Click a row to drill in.",
                 csv_df=by_dn, csv_name="oh_by_distributor.csv", key="oh_by_dn")
+            oh_tbl = by_dn[["Distributor", "Pipeline MT", "Pending release MT",
+                            "Pending invoice MT", "Pending lines", "Avg age (days)"]]
             oh_ev = st.dataframe(
-                by_dn[["Distributor", "Pipeline MT", "Pending release MT",
-                       "Pending invoice MT", "Pending lines", "Avg age (days)"]],
-                use_container_width=True, hide_index=True, height=420,
+                oh_tbl, use_container_width=True, hide_index=True, height=420,
                 on_select="rerun", selection_mode="single-row",
+                column_config=_num_cfg(oh_tbl, mt_extra=("Avg age (days)",)),
                 key="oh_dn_tbl")
             sel = (oh_ev.selection.rows
                    if oh_ev and oh_ev.selection else [])
@@ -1491,7 +1574,8 @@ with tab_cp:
             "Per-channel comparison",
             "Side-by-side Ordered MT across windows for each channel.",
             csv_df=ch_df, csv_name="period_compare_channels.csv", key="cp_ch")
-        st.dataframe(ch_df, use_container_width=True, hide_index=True)
+        st.dataframe(ch_df, use_container_width=True, hide_index=True,
+                     column_config=_num_cfg(ch_df))
 
     # Overlay daily trend
     with st.container(border=True):
@@ -1528,147 +1612,6 @@ with tab_cp:
                           legend=dict(orientation="h", y=-0.18))
         st.plotly_chart(theme.isolate_on_hover(fig), use_container_width=True)
 
-with tab_sc:
-    # ── Scheme analysis: Before / During / After uplift around a scheme ──────
-    st.markdown(
-        '<div class="chart-title">Scheme analysis</div>'
-        '<div class="chart-sub">Pick a scheme window. Each distributor is '
-        'measured over three equal-length windows — Before, During and After '
-        'the scheme — to show uplift (During vs Before) and whether it was '
-        'sustained (After vs Before).</div>',
-        unsafe_allow_html=True)
-
-    sc_now = datetime.now()
-    sc_def_end = sc_now.date()
-    sc_def_start = (sc_now - timedelta(days=13)).date()
-
-    with st.container(border=True):
-        sc1, sc2, sc3 = st.columns([2, 2, 3])
-        with sc1:
-            sc_start = st.date_input("Scheme start", value=sc_def_start,
-                                     key="sc_start")
-        with sc2:
-            sc_end = st.date_input("Scheme end", value=sc_def_end, key="sc_end")
-        with sc3:
-            sc_metric = st.radio("Metric", ["Ordered", "Invoiced"],
-                                 horizontal=True, key="sc_metric")
-
-    if not len(filtered):
-        st.info("Apply filters in the sidebar to see scheme uplift.")
-    elif sc_end < sc_start:
-        st.warning("Scheme end is before scheme start — adjust the dates.")
-    else:
-        win_len = (sc_end - sc_start).days + 1
-        before_start = sc_start - timedelta(days=win_len)
-        before_end = sc_start - timedelta(days=1)
-        after_start = sc_end + timedelta(days=1)
-        after_end = sc_end + timedelta(days=win_len)
-
-        def _bounds(s, e):
-            return (datetime.combine(s, datetime.min.time()),
-                    datetime.combine(e, datetime.max.time()))
-
-        def _dist_metric(s, e) -> pd.Series:
-            """Per-distributor metric over [s, e]. Ordered = sum _q by order
-            date; Invoiced = proportional invoice-date attribution."""
-            frm, to = _bounds(s, e)
-            if sc_metric == "Invoiced":
-                ser = data.invoiced_in_period(filtered, frm, to, inv_index)
-                return filtered.assign(_v=ser).groupby("_dn")["_v"].sum()
-            d = filtered["_d"]
-            win = filtered[d.notna() & (d >= frm) & (d <= to)]
-            if not len(win):
-                return pd.Series(dtype=float)
-            return win.groupby("_dn")["_q"].sum()
-
-        b_ser = _dist_metric(before_start, before_end)
-        d_ser = _dist_metric(sc_start, sc_end)
-        a_ser = _dist_metric(after_start, after_end)
-
-        names = sorted(set(b_ser.index) | set(d_ser.index) | set(a_ser.index))
-        rows = []
-        for dn in names:
-            bv = float(b_ser.get(dn, 0.0))
-            dv = float(d_ser.get(dn, 0.0))
-            av = float(a_ser.get(dn, 0.0))
-            if bv == 0 and dv == 0 and av == 0:
-                continue
-            rows.append({
-                "Distributor": dn,
-                "Before MT": bv, "During MT": dv, "After MT": av,
-                "Uplift %": ((dv - bv) / bv * 100) if bv > 0 else float("nan"),
-                "Sustained %": ((av - bv) / bv * 100) if bv > 0 else float("nan"),
-            })
-        tbl = pd.DataFrame(rows)
-
-        tot_b = float(b_ser.sum()) if len(b_ser) else 0.0
-        tot_d = float(d_ser.sum()) if len(d_ser) else 0.0
-        tot_a = float(a_ser.sum()) if len(a_ser) else 0.0
-        ov_upl = ((tot_d - tot_b) / tot_b * 100) if tot_b > 0 else 0.0
-        ov_sus = ((tot_a - tot_b) / tot_b * 100) if tot_b > 0 else 0.0
-        upl_cls = "up" if ov_upl >= 0 else "dn"
-
-        sc_cards = [
-            _kpi_card("k-re", f"Before · {win_len}d", data.fmt(tot_b),
-                      f"{before_start} → {before_end}"),
-            _kpi_card("k-in", f"During · {win_len}d", data.fmt(tot_d),
-                      f"{sc_start} → {sc_end}"),
-            _kpi_card("k-inp", f"After · {win_len}d", data.fmt(tot_a),
-                      f"{after_start} → {after_end}"),
-            (f'<div class="kc k-gap"><div class="kl">Overall uplift</div>'
-             f'<div class="kv {upl_cls}">{ov_upl:+.1f}<span class="ku">%</span></div>'
-             f'<div class="ks">During vs Before · sustained {ov_sus:+.1f}%</div>'
-             f'<div class="ch-subs"></div></div>'),
-        ]
-        st.markdown(
-            '<div class="kpi-row" style="grid-template-columns:repeat(4,1fr);">'
-            + "".join(sc_cards) + "</div>", unsafe_allow_html=True)
-        st.caption(
-            f"Metric: {sc_metric} MT · equal {win_len}-day windows. "
-            "Uplift = (During−Before)/Before; Sustained = (After−Before)/Before. "
-            "Blank % when the distributor had zero Before-window activity.")
-
-        with st.container(border=True):
-            _chart_header(
-                f"Per-distributor uplift — {sc_metric} MT",
-                "Click a row to drill into that distributor's During-window "
-                "line items.",
-                csv_df=tbl, csv_name="scheme_uplift.csv", key="sc_upl")
-            if not len(tbl):
-                st.info("No distributor activity in any of the three windows.")
-            else:
-                tbl = tbl.sort_values("During MT", ascending=False)
-                ev = st.dataframe(
-                    tbl, use_container_width=True, hide_index=True, height=420,
-                    on_select="rerun", selection_mode="single-row",
-                    key="sc_upl_tbl",
-                    column_config={
-                        "Before MT": st.column_config.NumberColumn(format="%.0f"),
-                        "During MT": st.column_config.NumberColumn(format="%.0f"),
-                        "After MT": st.column_config.NumberColumn(format="%.0f"),
-                        "Uplift %": st.column_config.NumberColumn(format="%.1f%%"),
-                        "Sustained %": st.column_config.NumberColumn(format="%.1f%%"),
-                    })
-                picks = ev.selection.rows if ev and ev.selection else []
-                if picks:
-                    pick = tbl.iloc[picks[0]]["Distributor"]
-                    if st.session_state.get("_sc_upl_last") != pick:
-                        st.session_state["_sc_upl_last"] = pick
-                        dfrm, dto = _bounds(sc_start, sc_end)
-                        sub = filtered[
-                            (filtered["_dn"] == pick) & filtered["_d"].notna()
-                            & (filtered["_d"] >= dfrm) & (filtered["_d"] <= dto)]
-                        drawer.open_drawer(
-                            f"{pick} — During window ({sc_start} → {sc_end})",
-                            _kpi_view(sub),
-                            subtitle=f"{len(sub):,} rows · "
-                                     f"{data.fmt(sub['_q'].sum())} MT ordered",
-                            summary=[("Ordered", data.fmt(sub['_q'].sum())),
-                                     ("Released", data.fmt(sub['_rq'].sum())),
-                                     ("Invoiced", data.fmt(sub['_iq'].sum())),
-                                     ("Lines", f"{len(sub):,}")],
-                            filename=f"scheme_{pick[:20].replace(' ', '_')}.csv")
-
 with tab_ln:
     # ── Line items — searchable table view of filtered rows ────────────────
     st.markdown(
@@ -1691,11 +1634,13 @@ with tab_ln:
         unsafe_allow_html=True)
 
     with st.container(border=True):
-        cols_to_show = ["_d", "_oid", "_dn", "_pt", "_sta", "_st", "_gr",
+        cols_to_show = ["_d", "_oid", "_dn", "_pt", "_ot", "_sta", "_st", "_gr",
                         "_dia", "_fm", "_q", "_rq", "_iq", "_cm"]
-        view = filtered[cols_to_show].rename(columns={
+        view = filtered[cols_to_show].copy()
+        view["_fm"] = view["_fm"].map(plots.form_label)
+        view = view.rename(columns={
             "_d": "Date", "_oid": "Order ID", "_dn": "Distributor",
-            "_pt": "Type", "_sta": "Status", "_st": "Ship to",
+            "_pt": "Type", "_ot": "Order type", "_sta": "Status", "_st": "Ship to",
             "_gr": "Grade", "_dia": "Dia", "_fm": "Form",
             "_q": "Qty MT", "_rq": "Rel MT", "_iq": "Inv MT", "_cm": "CM"})
         search = st.text_input(
@@ -1711,7 +1656,106 @@ with tab_ln:
             f"{len(view):,} of {len(filtered):,} rows",
             f"Filter: {search!r}" if search else "All rows passing the sidebar filters.",
             csv_df=view, csv_name="line_items.csv", key="ln")
-        st.dataframe(view, use_container_width=True, hide_index=True, height=560)
+        st.dataframe(view, use_container_width=True, hide_index=True, height=560,
+                     column_config=_num_cfg(view))
+
+
+with tab_cust:
+    st.markdown(
+        '<div class="chart-title">Customer buying-pattern analysis</div>'
+        '<div class="chart-sub">Per-customer (distributor / account) behaviour '
+        'across the current sidebar filters. Cancelled orders are excluded.</div>',
+        unsafe_allow_html=True)
+
+    cust_sub = st.tabs(["RFM segments", "Product mix", "Reorder cadence",
+                        "MoM growth"])
+
+    # — RFM —
+    with cust_sub[0]:
+        rfm_tbl = customer_logic.rfm(filtered, now)
+        with st.container(border=True):
+            _chart_header(
+                "RFM — Recency / Frequency / Monetary",
+                "Recency = days since last order · Frequency = distinct orders · "
+                "Monetary = ordered MT. Scores 1–3 (3 = best); segment from R & F.",
+                csv_df=rfm_tbl, csv_name="customer_rfm.csv", key="cust_rfm")
+            if len(rfm_tbl):
+                seg_counts = rfm_tbl["Segment"].value_counts()
+                seg_cards = [
+                    _kpi_card("k-or", "Customers", f"{len(rfm_tbl):,}", "in scope"),
+                    _kpi_card("k-in", "Champions",
+                              f"{int(seg_counts.get('Champion', 0)):,}", "R≥3 & F≥3"),
+                    _kpi_card("k-gap", "At risk / Dormant",
+                              f"{int(seg_counts.get('At risk', 0) + seg_counts.get('Dormant', 0)):,}",
+                              "need attention"),
+                ]
+                st.markdown(
+                    '<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);">'
+                    + "".join(seg_cards) + "</div>", unsafe_allow_html=True)
+            st.dataframe(
+                rfm_tbl, use_container_width=True, hide_index=True, height=460,
+                column_config={
+                    "Recency (days)": _mt_col("Recency (days)"),
+                    "Frequency": _mt_col("Frequency"),
+                    "Monetary (MT)": _mt_col("Monetary (MT)")})
+
+    # — Product mix —
+    with cust_sub[1]:
+        with st.container(border=True):
+            dim_lbl = st.radio("Break down by", ["Grade", "Form", "Channel"],
+                               horizontal=True, key="cust_mix_dim")
+            mix_tbl = customer_logic.mix(filtered, dim_lbl.lower())
+            _chart_header(
+                f"Product mix by {dim_lbl.lower()} — % of each customer's MT",
+                "Total MT plus the share (%) of each customer's ordered volume "
+                f"going to each {dim_lbl.lower()}.",
+                csv_df=mix_tbl, csv_name=f"customer_mix_{dim_lbl.lower()}.csv",
+                key="cust_mix")
+            pct_cols = [c for c in mix_tbl.columns
+                        if c not in ("Customer", "Total MT")]
+            cfg = {"Total MT": _mt_col("Total MT")}
+            cfg.update({c: _pct_col(c) for c in pct_cols})
+            st.dataframe(mix_tbl, use_container_width=True, hide_index=True,
+                         height=460, column_config=cfg)
+
+    # — Reorder cadence / churn —
+    with cust_sub[2]:
+        with st.container(border=True):
+            cad_tbl = customer_logic.cadence(filtered, now)
+            _chart_header(
+                "Reorder cadence & churn risk",
+                "Mean/median gap between orders and a status flag: Dormant "
+                "(no order in 60+ days) / At risk / Active.",
+                csv_df=cad_tbl, csv_name="customer_cadence.csv", key="cust_cad")
+            st.dataframe(
+                cad_tbl, use_container_width=True, hide_index=True, height=460,
+                column_config={
+                    "Orders": _mt_col("Orders"),
+                    "Mean gap (days)": _pct_col("Mean gap (days)"),
+                    "Median gap (days)": _pct_col("Median gap (days)"),
+                    "Recency (days)": _mt_col("Recency (days)"),
+                    "Last order": st.column_config.DateColumn("Last order")})
+
+    # — MoM growth —
+    with cust_sub[3]:
+        with st.container(border=True):
+            mom_tbl = customer_logic.mom_growth(filtered, months=6)
+            _chart_header(
+                "Month-over-month ordered MT (last 6 months)",
+                "Monthly ordered MT per customer; MoM % compares the two most "
+                "recent months. Sort to find fastest growers / decliners.",
+                csv_df=mom_tbl, csv_name="customer_mom.csv", key="cust_mom")
+            st.dataframe(mom_tbl, use_container_width=True, hide_index=True,
+                         height=460, column_config=_num_cfg(
+                             mom_tbl, pct=("MoM %",),
+                             mt_extra=tuple(c for c in mom_tbl.columns
+                                            if c not in ("Customer", "MoM %"))))
+
+
+with tab_bo:
+    be_output.render(filtered, df_cancelled, st.session_state.be_version,
+                     ag, inv_index, now, _mt_col, _pct_col, _chart_header,
+                     _kpi_card)
 
 
 # ─── Universal drill-down drawer (rendered last so it floats above) ──────────
