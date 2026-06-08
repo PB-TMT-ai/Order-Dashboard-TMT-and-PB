@@ -217,6 +217,13 @@ if df is None or not len(df):
             "(and an **Invoice** sheet if present) and builds all metrics.")
     st.stop()
 
+# Item 7: cancelled orders are tracked separately and globally excluded from
+# every order metric/view (Ordered MT, order book, BE actuals, drill-downs, …).
+# The full cancelled frame is kept for the dedicated KPI card below.
+_cancel_mask = df["_sta"].astype(str).str.strip().str.casefold() == "cancelled"
+df_cancelled = df[_cancel_mask].copy()
+df = df[~_cancel_mask].copy()
+
 # Restore the last-saved BE once per session (after order data is available)
 if (st.session_state.be_version is None and not st.session_state.be_restore_tried
         and storage.is_configured()):
@@ -275,6 +282,8 @@ def build_filters(df: pd.DataFrame) -> dict:
 
 f = build_filters(df)
 filtered = data.apply_filters(df, f)
+# Cancelled orders in the current sidebar scope (for the KPI card).
+cancelled_view = data.apply_filters(df_cancelled, f)
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +303,7 @@ _KPI_CSS = """
 .kc.k-in{border-left-color:#10B981}
 .kc.k-inp{border-left-color:#0EA5E9}
 .kc.k-gap{border-left-color:#ED1C24}
+.kc.k-canc{border-left-color:#64748B}
 .kl{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;
     letter-spacing:.5px;margin-bottom:4px}
 .kgaplbl{font-weight:400;color:#94A3B8;font-size:10px;text-transform:none;
@@ -369,6 +379,8 @@ cards = [
               _pct(kpis.invoiced), _ch_subs(kpis.ch_in)),
     _kpi_card("k-inp", "Invoiced in period ⓘ", data.fmt(inv_in_period),
               period["label"] if period else "All time", _ch_subs(ch_inp)),
+    _kpi_card("k-canc", "Cancelled", data.fmt(float(cancelled_view["_q"].sum())),
+              f"{len(cancelled_view):,} line items · excluded from all metrics"),
 ]
 if ag:
     gap = ag.matched_act - ag.tot_be  # negative ⇒ behind plan
