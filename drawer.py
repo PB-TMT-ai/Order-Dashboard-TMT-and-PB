@@ -41,12 +41,11 @@ def open_drawer(title: str, df: pd.DataFrame | None = None, *,
                 subtitle: str = "", summary: list[tuple[str, str]] | None = None,
                 filename: str = "drawer_rows.csv",
                 context: dict | None = None) -> None:
-    """Populate state, then directly invoke the dialog in the same script run.
-
-    Calling `_drawer_dialog()` here (instead of just flipping a flag and
-    running st.rerun()) is what makes Streamlit actually open the modal — a
-    dialog must be invoked during the same script run as the user
-    interaction that triggers it.
+    """Populate drawer state. The single `render()` call at the bottom of the
+    page invokes the dialog for this run, so we must NOT invoke `_drawer_dialog()`
+    here as well — doing both renders the dialog twice in one script run and
+    raises StreamlitDuplicateElementId. Callers may `st.rerun()` after this; the
+    dialog then opens via `render()` on the next run (state persists).
     """
     s = _state()
     s.open = True
@@ -56,7 +55,6 @@ def open_drawer(title: str, df: pd.DataFrame | None = None, *,
     s.df = df
     s.filename = filename
     s.context = context or {}
-    _drawer_dialog()
 
 
 def close_drawer() -> None:

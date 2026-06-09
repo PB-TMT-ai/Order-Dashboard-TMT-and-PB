@@ -20,7 +20,7 @@ import pandas as pd
 import streamlit as st
 
 import be_logic
-from data import cl, invoiced_in_range
+from data import cl, invoiced_in_range, norm_name, num
 
 # AOP rows that make up the TMT report scope ("all TMT lines").
 _AOP_TMT_ROWS = ("jsw one tmt", "one helix tmt")
@@ -52,23 +52,26 @@ def _quarter_months(y: int, m: int) -> list[tuple[int, int]]:
 
 
 # ── AOP parsing ──────────────────────────────────────────────────────────────
-def parse_aop(file_bytes: bytes) -> tuple[dict[tuple[int, int], float], str]:
-    """Parse an AOP workbook → {(year, month): MT} summed over the TMT rows.
+def _read_grid(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Read a .csv or .xlsx into a header-less object DataFrame."""
+    name = (filename or "").lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(io.BytesIO(file_bytes), header=None, dtype=object)
+    xls = pd.ExcelFile(io.BytesIO(file_bytes))
+    sheet = next((s for s in xls.sheet_names if "aop" in s.lower()),
+                 xls.sheet_names[0])
+    return pd.read_excel(xls, sheet_name=sheet, header=None, dtype=object)
 
-    Locates the 'Volume (mt)' block, reads the month header row (Apr-26 …),
-    and sums the JSW ONE TMT + One Helix TMT rows across the month columns.
-    Returns (mapping, error). On failure mapping is empty and error is set.
+
+def _parse_aop_block(raw: pd.DataFrame) -> tuple[dict[tuple[int, int], float], str]:
+    """Parse one AOP block → {(year, month): MT} summed over the TMT rows.
+
+    Locates the 'Volume (mt)' marker, reads the month header (Apr-26 …) and sums
+    the JSW ONE TMT + One Helix TMT rows across the month columns. Column indices
+    are positional, so a column-sliced block works as-is.
     """
-    try:
-        xls = pd.ExcelFile(io.BytesIO(file_bytes))
-        sheet = next((s for s in xls.sheet_names if "aop" in s.lower()),
-                     xls.sheet_names[0])
-        raw = pd.read_excel(xls, sheet_name=sheet, header=None, dtype=object)
-    except Exception as e:  # noqa: BLE001
-        return {}, f"Could not read AOP workbook: {e}"
-
     nrows, ncols = raw.shape
-    # Find the 'Volume (mt)' marker row.
+    # Find the 'Volume (mt)' marker row (first column of the block).
     vol_row = None
     for i in range(nrows):
         for j in range(min(ncols, 4)):
@@ -100,12 +103,44 @@ def parse_aop(file_bytes: bytes) -> tuple[dict[tuple[int, int], float], str]:
         label = str(raw.iat[i, 0] or "").strip().lower()
         if label in _AOP_TMT_ROWS:
             for j, (yy, mm) in best_cols.items():
-                val = _num(raw.iat[i, j])
-                out[(yy, mm)] = out.get((yy, mm), 0.0) + val
+                out[(yy, mm)] = out.get((yy, mm), 0.0) + _num(raw.iat[i, j])
     if not out:
         return {}, ("Found the Volume block but no TMT rows "
                     "(expected 'JSW ONE TMT' / 'One Helix TMT').")
     return out, ""
+
+
+def parse_aop_combined(file_bytes: bytes, filename: str = "") -> tuple[
+        dict[tuple[int, int], float], dict[tuple[int, int], float], str]:
+    """Parse the single Board+Internal AOP file → (board_map, internal_map, err).
+
+    The sheet holds the Board block in the left columns and the Internal block
+    starting at the 'FY27 AOP - Internal' column. We split on that column and
+    parse each side with `_parse_aop_block`. If no Internal marker is found the
+    whole sheet is treated as the Board block.
+    """
+    try:
+        raw = _read_grid(file_bytes, filename)
+    except Exception as e:  # noqa: BLE001
+        return {}, {}, f"Could not read AOP file: {e}"
+
+    nrows, ncols = raw.shape
+    split = None
+    for i in range(min(nrows, 6)):
+        for j in range(ncols):
+            if "internal" in str(raw.iat[i, j] or "").lower():
+                split = j
+                break
+        if split is not None:
+            break
+
+    if split is None or split <= 0:
+        board, err = _parse_aop_block(raw)
+        return board, {}, err
+    board, e1 = _parse_aop_block(raw.iloc[:, :split])
+    internal, e2 = _parse_aop_block(raw.iloc[:, split:])
+    err = "" if (board or internal) else (e1 or e2)
+    return board, internal, err
 
 
 def _parse_month_cell(v: object) -> tuple[int, int] | None:
@@ -128,6 +163,49 @@ def _num(v: object) -> float:
         return float(str(v).replace(",", "").strip() or 0)
     except (ValueError, TypeError):
         return 0.0
+
+
+def parse_order_be(file_bytes: bytes, filename: str = "") -> tuple[dict[str, float], str]:
+    """Parse a distributor → Order BE file (.csv/.xlsx) → {distNorm: MT}.
+
+    Finds a header row carrying a 'distributor' column and an Order-BE/quantity
+    column, then maps norm_name(distributor) → qty (summing duplicates). Same
+    name-normalisation as the BE sheet, so keys line up with the table.
+    """
+    try:
+        raw = _read_grid(file_bytes, filename)
+    except Exception as e:  # noqa: BLE001
+        return {}, f"Could not read Order BE file: {e}"
+
+    nrows, ncols = raw.shape
+    header_row = dist_col = qty_col = -1
+    for i in range(min(nrows, 15)):
+        di = qi = -1
+        for j in range(ncols):
+            v = str(raw.iat[i, j] or "").strip().lower()
+            if di < 0 and "distributor" in v:
+                di = j
+            if qi < 0 and ("order be" in v or "order_be" in v or v == "be"
+                           or "qty" in v or "quantity" in v):
+                qi = j
+        if di >= 0 and qi >= 0:
+            header_row, dist_col, qty_col = i, di, qi
+            break
+    if header_row < 0:
+        return {}, ("Need a header row with a 'Distributor' column and an "
+                    "'Order BE' (or qty) column.")
+
+    out: dict[str, float] = {}
+    for i in range(header_row + 1, nrows):
+        name = str(raw.iat[i, dist_col] or "").strip()
+        if not name or name.lower().startswith(("total", "grand total")):
+            continue
+        key = norm_name(name)
+        if key:
+            out[key] = out.get(key, 0.0) + num(raw.iat[i, qty_col])
+    if not out:
+        return {}, "No distributor rows with a value found in the Order BE file."
+    return out, ""
 
 
 # ── order-book / invoicing primitives ────────────────────────────────────────
@@ -369,23 +447,58 @@ def render(filtered, df_cancelled, be, ag, inv_index, now,
                 "figures come from it.")
         return
 
-    # Inputs: AOP uploads + manual Order BE.
-    with st.expander("Inputs — AOP files & Order BE", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        board_up = c1.file_uploader("Board AOP (.xlsx)", type=["xlsx"],
-                                    key="aop_board_up")
-        internal_up = c2.file_uploader("Internal AOP (.xlsx)", type=["xlsx"],
-                                       key="aop_internal_up")
-        order_be = c3.number_input("Order BE (month, MT)", min_value=0.0,
-                                   value=float(st.session_state.get("_bo_order_be", 0.0)),
-                                   step=100.0, key="bo_order_be_input")
-        st.session_state["_bo_order_be"] = order_be
+    # Inputs: one combined AOP file (Board + Internal), per-distributor Order BE
+    # upload (seeds the editable column), and a manual total Order BE fallback.
+    sy, sm = be.month_y, be.month_m + 1
+    mkey = f"{sy}-{sm:02d}"
+    ov_map = st.session_state.setdefault("_bo_order_be_map", {})
+    with st.expander("Inputs — AOP file & Order BE", expanded=False):
+        c1, c2 = st.columns(2)
+        aop_up = c1.file_uploader("AOP file — Board + Internal (.csv/.xlsx)",
+                                  type=["csv", "xlsx"], key="aop_combined_up")
+        obe_up = c2.file_uploader("Order BE by distributor (.csv/.xlsx)",
+                                  type=["csv", "xlsx"], key="bo_order_be_up")
 
-    aop_board = _load_aop(board_up, "_aop_board_cache")
-    aop_internal = _load_aop(internal_up, "_aop_internal_cache")
-    if board_up is None or internal_up is None:
-        st.caption("⬆ Upload Board & Internal AOP files to populate the AOP "
-                   "columns (the rest of the report works without them).")
+        aop_board, aop_internal, aop_fresh = _load_aop_combined(aop_up)
+        n_matched, n_total = _apply_order_be_upload(obe_up, ov_map, ag)
+
+        # Editable AOP for the selected month, pre-filled from the file. Keyed by
+        # month so each month keeps its own value. On a fresh upload we seed the
+        # widget's session_state directly: deleting the key + re-passing `value=`
+        # does NOT reliably reset a Streamlit number_input (it retains the prior
+        # widget value), so the parsed figures must be written into state.
+        bkey, ikey = f"aop_board_in_{mkey}", f"aop_internal_in_{mkey}"
+        if aop_fresh or bkey not in st.session_state:
+            st.session_state[bkey] = float(aop_board.get((sy, sm), 0.0))
+        if aop_fresh or ikey not in st.session_state:
+            st.session_state[ikey] = float(aop_internal.get((sy, sm), 0.0))
+        a1, a2, a3 = st.columns(3)
+        bd_in = a1.number_input(
+            f"AOP Board — {be.month_label} (MT)", min_value=0.0,
+            step=100.0, key=bkey)
+        intl_in = a2.number_input(
+            f"AOP Internal — {be.month_label} (MT)", min_value=0.0,
+            step=100.0, key=ikey)
+        order_be_manual = a3.number_input(
+            "Order BE total (MT, fallback)", min_value=0.0,
+            value=float(st.session_state.get("_bo_order_be", 0.0)), step=100.0,
+            key="bo_order_be_input",
+            help="Used for the total report only when no per-distributor "
+                 "Order BE is provided (below or uploaded).")
+        st.session_state["_bo_order_be"] = order_be_manual
+
+        if aop_up is None:
+            st.caption("⬆ Upload the AOP file to populate the AOP columns "
+                       "(the rest of the report works without it).")
+        if obe_up is not None:
+            st.caption(f"Order BE upload: {n_matched}/{n_total} distributor(s) "
+                       "matched the table by name.")
+
+    # Overlay the edited AOP onto the selected month so the month columns AND the
+    # quarter sums use it. Total Order BE = per-distributor sum when provided.
+    aop_board = {**aop_board, (sy, sm): bd_in}
+    aop_internal = {**aop_internal, (sy, sm): intl_in}
+    order_be = sum(ov_map.values()) if ov_map else order_be_manual
 
     cols, meta = build_report(filtered, be, ag, inv_index, now,
                               aop_board, aop_internal, order_be)
@@ -529,16 +642,39 @@ def _render_dist_table(filtered, be, ag, inv_index, now, meta,
                     filename=f"{str(row['Distributor'])[:30].replace(' ', '_')}_orders.csv")
 
 
-def _load_aop(upload, cache_key: str) -> dict:
-    """Parse an AOP upload once and cache by content; return the {(y,m): MT} map."""
+def _load_aop_combined(upload) -> tuple[dict, dict, bool]:
+    """Parse the combined Board+Internal AOP upload once (cache by size); return
+    (board_map, internal_map, fresh). `fresh` is True only on the run a new file
+    is first parsed, so the caller can (re)seed the editable AOP month inputs
+    from the parsed figures."""
     if upload is None:
-        return {}
+        return {}, {}, False
     raw = upload.getvalue()
-    cached = st.session_state.get(cache_key)
+    cached = st.session_state.get("_aop_combined_cache")
     if cached and cached.get("size") == len(raw):
-        return cached["map"]
-    mapping, err = parse_aop(raw)
+        return cached["board"], cached["internal"], False
+    board, internal, err = parse_aop_combined(raw, upload.name)
     if err:
         st.warning(f"AOP parse: {err}")
-    st.session_state[cache_key] = {"size": len(raw), "map": mapping}
-    return mapping
+    st.session_state["_aop_combined_cache"] = {
+        "size": len(raw), "board": board, "internal": internal}
+    return board, internal, True
+
+
+def _apply_order_be_upload(upload, ov_map: dict, ag) -> tuple[int, int]:
+    """Seed the per-distributor Order BE map from an upload once per distinct
+    file (manual edits then override). Returns (matched, total_in_file)."""
+    if upload is None:
+        return 0, 0
+    raw = upload.getvalue()
+    sig = (upload.name, len(raw))
+    file_map, err = parse_order_be(raw, upload.name)
+    if err:
+        st.warning(f"Order BE parse: {err}")
+        return 0, 0
+    if st.session_state.get("_bo_order_be_file_sig") != list(sig):
+        ov_map.update(file_map)
+        st.session_state["_bo_order_be_file_sig"] = list(sig)
+    known = set(ag.atom_lookup) if ag is not None else set()
+    matched = sum(1 for k in file_map if k in known)
+    return matched, len(file_map)

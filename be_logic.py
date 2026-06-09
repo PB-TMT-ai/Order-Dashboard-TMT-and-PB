@@ -197,6 +197,40 @@ class BeAggregate:
         return self.matched_pipe + self.nobe_pipe
 
 
+# Filler words ignored when comparing distributor names for variant matching.
+# (`norm_name` already drops legal suffixes like PVT/LTD/CO/INDIA.)
+_DIST_STOPWORDS = frozenset({"AND", "&", "THE", "OF"})
+
+
+def _name_tokens(norm: str) -> frozenset:
+    """Significant tokens of a normalised distributor name (stopwords removed)."""
+    return frozenset(t for t in norm.split() if t and t not in _DIST_STOPWORDS)
+
+
+def build_dist_alias(order_norms, be_norms) -> dict[str, str]:
+    """Map an order distNorm -> a BE distNorm for non-exact but unambiguous
+    name variants, so e.g. "ROHIT IRON" folds into "ROHIT IRON AND STEEL".
+
+    A variant matches only when, ignoring stopwords, one name's token set is a
+    subset of the other AND there is exactly ONE such BE candidate. Requiring a
+    single unambiguous candidate (and >=2 shared significant tokens) avoids
+    merging genuinely different distributors that share a common word.
+    """
+    be_tokens = {b: _name_tokens(b) for b in be_norms if b}
+    alias: dict[str, str] = {}
+    for o in order_norms:
+        if not o or o in be_norms:
+            continue
+        ot = _name_tokens(o)
+        if len(ot) < 2:
+            continue
+        cands = [b for b, bt in be_tokens.items()
+                 if bt and (ot <= bt or bt <= ot) and len(ot & bt) >= 2]
+        if len(cands) == 1:
+            alias[o] = cands[0]
+    return alias
+
+
 def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
                    inv_index: dict[str, InvoiceEntry],
                    today: datetime | None = None) -> BeAggregate | None:
@@ -213,6 +247,12 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
     atomic = flatten_be_atomic(be.rows)
     atom_lookup = {a["distNorm"]: a for a in atomic}
     dist_has_be = set(atom_lookup.keys())
+
+    # Fold unambiguous name variants ("Rohit Iron" -> "Rohit Iron and Steel")
+    # so their orders count against the matching BE distributor.
+    order_norms = set(df["_dnN"].unique()) if "_dnN" in df.columns and len(df) \
+        else set()
+    dist_alias = build_dist_alias(order_norms, dist_has_be)
 
     be_month_start = datetime(be.month_y, be.month_m + 1, 1)
     next_month = (datetime(be.month_y, be.month_m + 2, 1)
@@ -233,7 +273,8 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
         # Eligible by scope. Distributors in BE feed the plan-vs-actual gap;
         # eligible distributors with NO BE are tracked separately so the total
         # actuals still reconcile with the invoiced figure for this scope.
-        has_be = r["_dnN"] in dist_has_be
+        key = dist_alias.get(r["_dnN"], r["_dnN"])
+        has_be = key in dist_has_be
         inv_qty = invoiced_in_range(r, be_month_start, be_month_end, inv_index)
         # _q is net of the rejected/cancelled qty already, so pipeline is just
         # the un-invoiced remainder (order status is not consulted).
@@ -253,7 +294,7 @@ def be_actuals_agg(df: pd.DataFrame, be: BeVersion,
         if has_be:
             matched_act += inv_qty
             matched_pipe += pipe_eff
-            orders_by_key.setdefault(r["_dnN"], []).append(entry)
+            orders_by_key.setdefault(key, []).append(entry)
         else:
             nobe_act += inv_qty
             nobe_pipe += pipe_eff
@@ -469,9 +510,14 @@ def be_state_gap(df: pd.DataFrame, ag: BeAggregate, today: datetime,
     g = g[g["State"].astype(str).str.strip() != ""]
     g = g[g["State"] != "—"]
     if mode == "pct":
-        g["value"] = (g["actuals"] - g["be"]) / g["be"].replace(0, float("nan")) * 100.0
+        g["value"] = ((g["actuals"] - g["be"])
+                      / g["be"].replace(0, float("nan")) * 100.0).round(1)
     else:
-        g["value"] = g["actuals"] - g["adj_be"]
+        g["value"] = (g["actuals"] - g["adj_be"]).round(0)
+    # Round the hover figures too — the choropleth's %{z} token does not honour
+    # the inline format spec, so unrounded floats leak into the tooltip.
+    g["be"] = g["be"].round(0)
+    g["actuals"] = g["actuals"].round(0)
     return g.rename(columns={"State": "state"})[
         ["state", "value", "be", "actuals"]]
 

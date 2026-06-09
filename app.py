@@ -233,6 +233,12 @@ df_cancelled = df[df["_cq"] > 0].copy()
 _dead = (df["_q"] <= 0) & (df["_rq"] <= 0) & (df["_iq"] <= 0)
 df = df[~_dead].copy()
 
+# Page-wide "now" — used by the Customers, BE Output and other tabs. Defined
+# once here so it is always available, even before a BE file is loaded (the BE
+# tab previously assigned it only inside the `ag is not None` branch, so the
+# Customers tab / BE Output crashed with NameError until a BE was uploaded).
+now = datetime.now()
+
 # Restore the last-saved BE once per session (after order data is available)
 if (st.session_state.be_version is None and not st.session_state.be_restore_tried
         and storage.is_configured()):
@@ -730,6 +736,7 @@ with tab_ov:
         sv = sv.groupby("state", as_index=False)["_q"].sum()
         sv = sv.rename(columns={"_q": "value"}).sort_values(
             "value", ascending=False)
+        sv["value"] = sv["value"].round(0)  # whole MT in the map tooltip
 
         # Map (left, 3) + Top-10 sidekick (right, 2)
         m_col, t_col = st.columns([3, 2])
@@ -1762,7 +1769,12 @@ with tab_cust:
 
 
 with tab_bo:
-    be_output.render(filtered, df_cancelled, st.session_state.be_version,
+    # BE Output defines its own month windows (opening backlog, MTD orders,
+    # invoicing, LY month), so it must see the full order history — pass the
+    # frame with non-date filters applied but the sidebar date window ignored,
+    # otherwise Opening OB / "from opening" invoicing collapse to 0.
+    filtered_full = data.apply_filters(df, f, skip_period=True)
+    be_output.render(filtered_full, df_cancelled, st.session_state.be_version,
                      ag, inv_index, now, _mt_col, _pct_col, _chart_header,
                      _kpi_card, kpi_view=_kpi_view,
                      open_drawer=drawer.open_drawer)
