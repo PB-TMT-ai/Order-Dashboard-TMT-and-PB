@@ -736,6 +736,7 @@ with tab_ov:
         sv = sv.groupby("state", as_index=False)["_q"].sum()
         sv = sv.rename(columns={"_q": "value"}).sort_values(
             "value", ascending=False)
+        sv["value"] = sv["value"].round(0)  # whole MT in the map tooltip
 
         # Map (left, 3) + Top-10 sidekick (right, 2)
         m_col, t_col = st.columns([3, 2])
