@@ -505,11 +505,18 @@ def apply_non_date_filters(df: pd.DataFrame, f: dict) -> pd.DataFrame:
     return df[_multi_mask(df, f)]
 
 
-def apply_filters(df: pd.DataFrame, f: dict, today: datetime | None = None) -> pd.DataFrame:
-    """Apply the full sidebar filter set (date range + all multi-selects)."""
+def apply_filters(df: pd.DataFrame, f: dict, today: datetime | None = None,
+                  skip_period: bool = False) -> pd.DataFrame:
+    """Apply the full sidebar filter set (date range + all multi-selects).
+
+    `skip_period=True` applies only the non-date (multiselect) filters and
+    ignores the sidebar date window — used by the BE Output tab, whose
+    order-book / invoicing math defines its own month windows and must see the
+    full order history regardless of the date filter.
+    """
     mask = _multi_mask(df, f)
 
-    period = get_active_period(f, today)
+    period = None if skip_period else get_active_period(f, today)
     if period and (period["from"] is not None or period["to"] is not None):
         d = df["_d"]
         has_date = d.notna()

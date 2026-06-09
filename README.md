@@ -52,10 +52,12 @@ storage_io.py    # Upload/download Excel binaries to Cloudflare R2 (boto3 / S3 A
   and Volume at Risk (BE − Realistic). The rejected/cancelled qty ('total cancelled
   qty' column) is netted out of every order metric (order status is not used).
 - **BE Output** — monthly AOP-vs-BE / order-book / invoicing operating report for the
-  loaded BE month (uploads Board & Internal AOP files; Order BE entered manually).
-  Includes a **per-distributor table** (same grain as Vs BE) with Opening/Closing OB,
-  MTD orders & invoicing split, Invoice/Order DRR, an editable per-distributor Order BE,
-  search/state filters and drill-down to the line-item drawer.
+  loaded BE month. Uploads one combined Board+Internal AOP file (.csv/.xlsx; the parsed
+  month values are editable as an override). Order BE is provided per distributor — by
+  upload (.csv/.xlsx, distributor → Order BE) and/or by editing the column. Includes a
+  **per-distributor table** (same grain as Vs BE) with Opening/Closing OB, MTD orders &
+  invoicing split, Invoice/Order DRR, search/state filters and drill-down. The tab runs
+  on full order history (it ignores the sidebar date window) so Opening OB is correct.
 - **Customers** — RFM segmentation, product mix, reorder cadence/churn, and MoM growth
   per distributor/account.
 

@@ -1762,7 +1762,12 @@ with tab_cust:
 
 
 with tab_bo:
-    be_output.render(filtered, df_cancelled, st.session_state.be_version,
+    # BE Output defines its own month windows (opening backlog, MTD orders,
+    # invoicing, LY month), so it must see the full order history — pass the
+    # frame with non-date filters applied but the sidebar date window ignored,
+    # otherwise Opening OB / "from opening" invoicing collapse to 0.
+    filtered_full = data.apply_filters(df, f, skip_period=True)
+    be_output.render(filtered_full, df_cancelled, st.session_state.be_version,
                      ag, inv_index, now, _mt_col, _pct_col, _chart_header,
                      _kpi_card, kpi_view=_kpi_view,
                      open_drawer=drawer.open_drawer)
