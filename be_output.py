@@ -459,21 +459,26 @@ def render(filtered, df_cancelled, be, ag, inv_index, now,
         obe_up = c2.file_uploader("Order BE by distributor (.csv/.xlsx)",
                                   type=["csv", "xlsx"], key="bo_order_be_up")
 
-        aop_board, aop_internal = _load_aop_combined(aop_up)
+        aop_board, aop_internal, aop_fresh = _load_aop_combined(aop_up)
         n_matched, n_total = _apply_order_be_upload(obe_up, ov_map, ag)
 
         # Editable AOP for the selected month, pre-filled from the file. Keyed by
-        # month so each month keeps its own value; a new file upload clears these
-        # (see _load_aop_combined) so the fresh figures show.
+        # month so each month keeps its own value. On a fresh upload we seed the
+        # widget's session_state directly: deleting the key + re-passing `value=`
+        # does NOT reliably reset a Streamlit number_input (it retains the prior
+        # widget value), so the parsed figures must be written into state.
+        bkey, ikey = f"aop_board_in_{mkey}", f"aop_internal_in_{mkey}"
+        if aop_fresh or bkey not in st.session_state:
+            st.session_state[bkey] = float(aop_board.get((sy, sm), 0.0))
+        if aop_fresh or ikey not in st.session_state:
+            st.session_state[ikey] = float(aop_internal.get((sy, sm), 0.0))
         a1, a2, a3 = st.columns(3)
         bd_in = a1.number_input(
             f"AOP Board — {be.month_label} (MT)", min_value=0.0,
-            value=float(aop_board.get((sy, sm), 0.0)), step=100.0,
-            key=f"aop_board_in_{mkey}")
+            step=100.0, key=bkey)
         intl_in = a2.number_input(
             f"AOP Internal — {be.month_label} (MT)", min_value=0.0,
-            value=float(aop_internal.get((sy, sm), 0.0)), step=100.0,
-            key=f"aop_internal_in_{mkey}")
+            step=100.0, key=ikey)
         order_be_manual = a3.number_input(
             "Order BE total (MT, fallback)", min_value=0.0,
             value=float(st.session_state.get("_bo_order_be", 0.0)), step=100.0,
@@ -637,26 +642,23 @@ def _render_dist_table(filtered, be, ag, inv_index, now, meta,
                     filename=f"{str(row['Distributor'])[:30].replace(' ', '_')}_orders.csv")
 
 
-def _load_aop_combined(upload) -> tuple[dict, dict]:
+def _load_aop_combined(upload) -> tuple[dict, dict, bool]:
     """Parse the combined Board+Internal AOP upload once (cache by size); return
-    (board_map, internal_map). On a new file, clear the editable AOP month inputs
-    so the fresh figures show instead of stale edits."""
+    (board_map, internal_map, fresh). `fresh` is True only on the run a new file
+    is first parsed, so the caller can (re)seed the editable AOP month inputs
+    from the parsed figures."""
     if upload is None:
-        return {}, {}
+        return {}, {}, False
     raw = upload.getvalue()
     cached = st.session_state.get("_aop_combined_cache")
     if cached and cached.get("size") == len(raw):
-        return cached["board"], cached["internal"]
+        return cached["board"], cached["internal"], False
     board, internal, err = parse_aop_combined(raw, upload.name)
     if err:
         st.warning(f"AOP parse: {err}")
     st.session_state["_aop_combined_cache"] = {
         "size": len(raw), "board": board, "internal": internal}
-    # New file → drop the per-month AOP override widgets so they re-default.
-    for k in [k for k in st.session_state
-              if k.startswith(("aop_board_in_", "aop_internal_in_"))]:
-        del st.session_state[k]
-    return board, internal
+    return board, internal, True
 
 
 def _apply_order_be_upload(upload, ov_map: dict, ag) -> tuple[int, int]:

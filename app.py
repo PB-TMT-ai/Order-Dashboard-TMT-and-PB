@@ -233,6 +233,12 @@ df_cancelled = df[df["_cq"] > 0].copy()
 _dead = (df["_q"] <= 0) & (df["_rq"] <= 0) & (df["_iq"] <= 0)
 df = df[~_dead].copy()
 
+# Page-wide "now" — used by the Customers, BE Output and other tabs. Defined
+# once here so it is always available, even before a BE file is loaded (the BE
+# tab previously assigned it only inside the `ag is not None` branch, so the
+# Customers tab / BE Output crashed with NameError until a BE was uploaded).
+now = datetime.now()
+
 # Restore the last-saved BE once per session (after order data is available)
 if (st.session_state.be_version is None and not st.session_state.be_restore_tried
         and storage.is_configured()):
