@@ -1,6 +1,7 @@
 """Customer (distributor/account) buying-pattern analytics.
 
-Operates on the enriched, cancelled-excluded order frame from data.enrich().
+Operates on the enriched order frame from data.enrich() (the rejected/cancelled
+qty is already netted out of each order's quantity).
 The customer key is the distributor display name `_dn` (blank → "Direct").
 Provides RFM segmentation, product mix, reorder cadence / churn flags and
 month-over-month growth — consumed by the Customer tab in app.py.

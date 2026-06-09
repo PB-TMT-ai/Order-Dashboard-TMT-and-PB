@@ -270,10 +270,15 @@ def enrich(order_df: pd.DataFrame, inv_index: dict[str, InvoiceEntry],
     idx = order_df.index
 
     dt = _date_series(_col(order_df, "date"))
-    q = _num_series(_col(order_df, "qty"))
+    q_gross = _num_series(_col(order_df, "qty"))
     rq = _num_series(_col(order_df, "rqty"))
     iq = _num_series(_col(order_df, "iqty"))
     cq = _num_series(_col(order_df, "cqty"))
+    # "Cancelled" = the rejected/cancelled QUANTITY ('total cancelled qty'),
+    # NOT the order-status flag. The rejected qty is netted out of the active
+    # order quantity so it is excluded from every order metric; the cancelled
+    # qty itself (_cq) and the gross order qty (_qg) are kept for reporting.
+    q = (q_gross - cq).clip(lower=0)
     sta = _cl_series(_col(order_df, "status"))
     ot = _cl_series(_col(order_df, "ot"))
     dis = _cl_series(_col(order_df, "dis"))
@@ -316,9 +321,9 @@ def enrich(order_df: pd.DataFrame, inv_index: dict[str, InvoiceEntry],
     dn_norm = (dn.str.upper().str.replace(_NAME_PUNCT, " ", regex=True)
                .str.replace(_NAME_TOKENS, "", regex=True).str.strip())
 
-    # Pending + short-close
-    raw_pend = np.where(sta.values == "Cancelled", 0.0,
-                        np.maximum(q.values - rq.values - cq.values, 0.0))
+    # Pending + short-close. _q is already net of the cancelled/rejected qty,
+    # so pending is simply the un-released remainder (status is not consulted).
+    raw_pend = np.maximum(q.values - rq.values, 0.0)
     days_old = (today_ts - dt).dt.days
     short_small = (raw_pend > 0) & (raw_pend < 5)
     short_old = (raw_pend >= 5) & has_date.values & (days_old.values > SHORT_CLOSE_DAYS)
@@ -336,7 +341,8 @@ def enrich(order_df: pd.DataFrame, inv_index: dict[str, InvoiceEntry],
         errors="coerce")
 
     return pd.DataFrame({
-        "_d": dt.to_numpy(), "_q": q.values, "_rq": rq.values, "_iq": iq.values,
+        "_d": dt.to_numpy(), "_q": q.values, "_qg": q_gross.values,
+        "_rq": rq.values, "_iq": iq.values,
         "_cq": cq.values, "_pt": pt, "_w": w.values, "_m": m.values, "_y": y.values,
         "_st": _cl_series(_col(order_df, "sts")).values,
         "_ct": _cl_series(_col(order_df, "stc")).values,
