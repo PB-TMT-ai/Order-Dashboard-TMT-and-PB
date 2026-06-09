@@ -23,26 +23,49 @@ Why? 90% accuracy across 5 steps = 59% total success. Push repeatable work into 
 
 ## Tech Stack
 
-- React
-- TypeScript
-- Tailwind CSS
-- Supabase
-- Next.js
+- Python 3.11
+- Streamlit (UI, run with `streamlit run app.py`)
+- pandas + NumPy (data layer)
+- Plotly (charts)
+- openpyxl / python-calamine (Excel parsing)
+- boto3 → Cloudflare R2, S3-compatible (optional persistence)
+
+No Node/React build. An unused Next.js scaffold lingers under `/src`
+(`.gitkeep` placeholders + `src/lib/logger.ts`) — the live app is the
+top-level Python modules. Ignore `/src` unless you are intentionally
+reviving that scaffold.
 
 ## Project Structure
 
-/src (components, pages, hooks, lib, types, styles)
-/scripts - Automation scripts
-/blueprints - Task SOPs
-/.workspace - Temp files (gitignored)
+Top-level Python modules (the app):
+
+- `app.py` — Streamlit entry: upload, sidebar filters, KPI strip, tabs (Overview, Vs BE, BE Output, Drill-down, Orders in Hand, Period compare, Customers, Line items)
+- `data.py` — Order Excel parsing, `enrich()`, channel classifier, filters
+- `be_logic.py` — BE Excel parsing, plan-vs-actual aggregation (`be_actuals_agg`, `be_table`, `be_mom`)
+- `be_output.py` — BE Output Report: AOP parsing, order-book accounting, monthly report + per-distributor table
+- `customer_logic.py` — distributor/account buying-pattern analytics (RFM, cadence, MoM)
+- `drawer.py` — right-side slide-over detail panel (`open_drawer` / `render`)
+- `plots.py` — Plotly figures
+- `storage_io.py` — Cloudflare R2 persistence (optional; app runs without it)
+- `theme.py` — JSW One brand theme / Plotly defaults
+
+Supporting dirs:
+
+- `/blueprints` — task SOPs (check FIRST)
+- `/scripts` — tested automation scripts (currently empty)
+- `/tests` — `unit/` + `integration/` (no runner wired up yet)
+- `/.streamlit` — Streamlit config/theme
+- `/.workspace` — temp files, gitignored, never commit
+- `.env.example` — R2 env vars (`R2_ENDPOINT`/`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`)
 
 ## Code Standards
 
-- TypeScript strict, explicit return types
-- Functional components only
-- Props: ComponentNameProps
-- No any - use unknown
-- Async/await over .then()
+- `from __future__ import annotations`; type hints + explicit return types
+- Functional style; `@dataclass` for state containers (e.g. `DrawerState`, `BeAggregate`)
+- Vectorise pandas work; preserve the documented business rules exactly (channel classification, P&T vs TMT, short-close, invoice-date attribution)
+- Streamlit reruns top-to-bottom on every interaction — define shared values (e.g. `now`) before the tabs, and seed widget `session_state` rather than relying on `del key` + `value=` to reset a widget
+- Keep number formatting consistent (% ≤1 dp, MT 0 dp)
+- Run a boot smoke before declaring done: `AppTest.from_file("app.py").run()` should have 0 exceptions
 
 ## Error Protocol
 
