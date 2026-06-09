@@ -226,6 +226,13 @@ if df is None or not len(df):
 # cancelled qty are kept here for the dedicated KPI card / detail drawer.
 df_cancelled = df[df["_cq"] > 0].copy()
 
+# Hide fully-rejected / empty lines — no net qty and nothing released or
+# invoiced — from every line-item view and count. They contribute 0 to all
+# volume metrics anyway; their cancelled qty is still captured in df_cancelled
+# above for the Cancelled KPI / detail drawer.
+_dead = (df["_q"] <= 0) & (df["_rq"] <= 0) & (df["_iq"] <= 0)
+df = df[~_dead].copy()
+
 # Restore the last-saved BE once per session (after order data is available)
 if (st.session_state.be_version is None and not st.session_state.be_restore_tried
         and storage.is_configured()):
