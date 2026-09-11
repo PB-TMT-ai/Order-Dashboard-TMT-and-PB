@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PB MTD Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --navy-900:#0B2540;
+    --navy-800:#123A5E;
+    --navy-700:#1B4E77;
+    --blue-50:#EDF2F7;
+    --grey-25:#FAFAF9;
+    --grey-100:#F2F1EE;
+    --border:#DADCE0;
+    --ink:#1F2937;
+    --ink-soft:#6B7280;
+    --accent:#C1622A;
+    --good:#1E7A46;
+    --good-bg:#E6F4EA;
+    --warn:#9A6A00;
+    --warn-bg:#FDF3D8;
+    --bad:#B3261E;
+    --bad-bg:#FBE7E5;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:#E7E5E0;
+    font-family:'Inter',-apple-system,'Segoe UI',sans-serif;
+    color:var(--ink);
+    display:flex;
+    justify-content:center;
+    padding:28px 0;
+  }
+  .sheet{
+    width:1500px;
+    background:#fff;
+    box-shadow:0 18px 44px rgba(11,37,64,0.16);
+  }
+
+  /* ===== HEADER ===== */
+  header{
+    background:var(--navy-900);
+    color:#fff;
+    padding:24px 44px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    border-bottom:3px solid var(--accent);
+  }
+  .brandline{
+    font-size:11px;
+    font-weight:600;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    color:#9FB6CB;
+    margin-bottom:8px;
+  }
+  .htitle{
+    font-weight:700;
+    font-size:26px;
+    letter-spacing:.01em;
+    line-height:1.15;
+  }
+  .hsub{
+    font-size:12px;
+    color:#B7C9D8;
+    margin-top:5px;
+    font-weight:400;
+  }
+  .hright{text-align:right;}
+  .hright .asof{
+    font-size:11.5px;
+    color:#9FB6CB;
+    font-weight:500;
+    letter-spacing:.02em;
+  }
+  .hright .biginv{
+    font-weight:800;
+    font-size:36px;
+    color:#fff;
+    line-height:1.15;
+    margin-top:4px;
+  }
+  .hright .biginv small{
+    display:block;
+    font-weight:600;
+    font-size:10.5px;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+    color:#C1622A;
+    margin-top:2px;
+  }
+  .hright .mom{
+    margin-top:6px;
+    font-size:11px;
+    color:#B7C9D8;
+    font-weight:400;
+  }
+  .hright .mom b{color:#6FCB93;font-weight:700;}
+
+  /* ===== SECTION LABEL ===== */
+  .seclabel{
+    display:flex; align-items:center; gap:10px;
+    padding:22px 44px 10px;
+  }
+  .seclabel .num{
+    font-weight:700;
+    font-size:11px;
+    color:#fff;
+    background:var(--navy-800);
+    border-radius:3px;
+    padding:3px 8px;
+    letter-spacing:.02em;
+  }
+  .seclabel .txt{
+    font-weight:700;
+    font-size:14px;
+    letter-spacing:.01em;
+    color:var(--navy-900);
+  }
+  .seclabel .rule{flex:1;height:1px;background:var(--border);}
+
+  /* ===== KPI STRIP ===== */
+  .kpi-strip{
+    display:grid;
+    grid-template-columns:repeat(11,1fr);
+    gap:12px;
+    padding:6px 44px 22px;
+  }
+  .kpi{
+    background:var(--grey-25);
+    border:1px solid var(--border);
+    border-radius:6px;
+    padding:12px 12px 13px;
+    display:flex;
+    flex-direction:column;
+    min-height:112px;
+  }
+  .kpi .lbl{
+    font-size:9.6px;
+    font-weight:600;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+    color:var(--ink-soft);
+    min-height:24px;
+    line-height:1.3;
+  }
+  .kpi .val{
+    font-weight:800;
+    font-size:23px;
+    color:var(--navy-900);
+    margin-top:4px;
+    line-height:1.1;
+    font-variant-numeric:tabular-nums;
+  }
+  .kpi .brk{
+    margin-top:auto;
+    padding-top:8px;
+    font-size:9.6px;
+    color:var(--ink-soft);
+    line-height:1.5;
+    font-variant-numeric:tabular-nums;
+  }
+  .kpi .brk b{color:var(--navy-800);font-weight:600;}
+
+  /* ===== TABLES ===== */
+  .tblwrap{padding:0 44px 6px;}
+  table{
+    width:100%;
+    border-collapse:collapse;
+  }
+  thead th{
+    background:var(--navy-800);
+    color:#EAF1F6;
+    font-size:10px;
+    font-weight:600;
+    text-transform:uppercase;
+    letter-spacing:.02em;
+    text-align:right;
+    padding:9px 10px;
+    white-space:nowrap;
+  }
+  thead th.left{text-align:left;}
+  tbody td{
+    font-size:12px;
+    padding:7px 10px;
+    text-align:right;
+    border-bottom:1px solid var(--border);
+    color:var(--ink);
+    font-variant-numeric:tabular-nums;
+  }
+  tbody td.left{text-align:left;}
+  tbody tr.plantgroup:nth-of-type(odd) td{background:var(--grey-25);}
+  tbody tr.plantgroup:nth-of-type(even) td{background:#fff;}
+  td.plant{
+    font-weight:700;
+    font-size:12px;
+    color:var(--navy-900);
+    text-align:left;
+    vertical-align:middle;
+    border-right:1px solid var(--border);
+  }
+  td.grade{
+    text-align:left;
+    color:var(--ink-soft);
+    font-weight:500;
+  }
+  td.crit{
+    text-align:left;
+    font-size:10px;
+    color:var(--ink-soft);
+    line-height:1.4;
+    max-width:230px;
+  }
+  .badge{
+    display:inline-block;
+    min-width:28px;
+    padding:2px 7px;
+    border-radius:3px;
+    font-weight:700;
+    font-size:11.5px;
+  }
+  .b-good{background:var(--good-bg);color:var(--good);}
+  .b-warn{background:var(--warn-bg);color:var(--warn);}
+  .b-bad{background:var(--bad-bg);color:var(--bad);}
+  tr.total td{
+    background:var(--navy-900)!important;
+    color:#fff;
+    font-weight:700;
+    font-size:12.5px;
+    border-bottom:none;
+    border-top:2px solid var(--accent);
+  }
+  tr.total td.left{text-align:left;}
+
+  .zonegrp td.left{padding-left:20px;vertical-align:middle;}
+  .zonegrp td.left:first-child{padding-left:10px;border-right:1px solid var(--border);}
+  .zone-head td{
+    font-weight:700;
+    color:var(--navy-900);
+    background:var(--blue-50)!important;
+  }
+
+  footer{
+    background:var(--navy-900);
+    color:#8298AC;
+    font-size:10px;
+    letter-spacing:.02em;
+    padding:12px 44px;
+    display:flex;
+    justify-content:space-between;
+    margin-top:14px;
+  }
+  footer b{color:#C1622A;}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <header>
+    <div>
+      <div class="brandline">JSW ONE &nbsp;·&nbsp; PRIVATE BRANDS — TMT</div>
+      <div class="htitle">PB MTD Dashboard</div>
+      <div class="hsub">Month-to-Date Snapshot &nbsp;·&nbsp; September 2026 &nbsp;·&nbsp; All Plants</div>
+    </div>
+    <div class="hright">
+      <div class="asof">AS ON 11 SEP 2026 &nbsp;·&nbsp; DAY 11/30</div>
+      <div class="biginv">8,562 <small>MT Invoiced MTD</small></div>
+      <div class="mom">Invoice % of BE <b>26%</b> &nbsp;·&nbsp; Dispatch D-1 <b>913 MT</b> &nbsp;·&nbsp; 36.7% of month elapsed</div>
+    </div>
+  </header>
+
+  <div class="seclabel">
+    <div class="num">01</div>
+    <div class="txt">Key Metrics — MTD Snapshot</div>
+    <div class="rule"></div>
+  </div>
+
+  <div class="kpi-strip">
+    
+    <div class="kpi">
+      <div class="lbl">Latest BE (MT)</div>
+      <div class="val">33,500</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Orders Received</div>
+      <div class="val">17,075</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Invoiced MTD</div>
+      <div class="val">8,562</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Dispatch D-1</div>
+      <div class="val">913</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Invoice % of BE</div>
+      <div class="val">26%</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Physical Inventory</div>
+      <div class="val">12,142</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Production MTD</div>
+      <div class="val">9,029</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Balance to Produce</div>
+      <div class="val">13,171</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Expected Closing Inv.</div>
+      <div class="val">16,661</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Days of Inventory</div>
+      <div class="val">11</div>
+      
+    </div>
+    
+    <div class="kpi">
+      <div class="lbl">Ageing (Days)</div>
+      <div class="val">21.0</div>
+      
+    </div>
+    
+  </div>
+
+  <div class="seclabel">
+    <div class="num">02</div>
+    <div class="txt">Plant-wise Performance (MT) — by Grade</div>
+    <div class="rule"></div>
+  </div>
+
+  <div class="tblwrap">
+  <table>
+    <thead>
+      <tr>
+        <th class="left" style="width:150px;">Plant</th>
+        <th class="left" style="width:80px;">Grade</th>
+        <th>BE</th><th>Orders</th><th>Invoiced</th><th>Conf. Pend. Inv.</th>
+        <th>Pending Orders</th><th>Physical Inv</th><th>DOH</th><th>Ageing</th>
+        <th class="left">Critical Dia</th>
+      </tr>
+    </thead>
+    <tbody>
+      
+        
+        <tr class="plantgroup">
+          <td class="plant" rowspan="1">Amba-Sikandrabad</td>
+          <td class="grade">FE 550</td>
+          <td>7,100</td>
+          <td>2,961</td>
+          <td>1,273</td>
+          <td>533</td>
+          <td>1,154</td>
+          <td>2,367</td>
+          <td><span class="badge b-good">10</span></td>
+          <td><span class="badge b-good">12</span></td>
+          <td class="crit">FE 550 (8MM–11T, 12MM–207T, 16MM–101T)</td>
+        </tr>
+        
+      
+        
+        <tr class="plantgroup">
+          <td class="plant" rowspan="2">Amba Gwalior</td>
+          <td class="grade">FE 550</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>37</td>
+          <td><span class="badge b-good">–</span></td>
+          <td><span class="badge b-bad">205</span></td>
+          <td class="crit"></td>
+        </tr>
+        
+        <tr class="plantgroup">
+          
+          <td class="grade">FE 550D</td>
+          <td>5,100</td>
+          <td>4,313</td>
+          <td>2,780</td>
+          <td>544</td>
+          <td>981</td>
+          <td>1,503</td>
+          <td><span class="badge b-good">9</span></td>
+          <td><span class="badge b-good">10</span></td>
+          <td class="crit">FE 550D (10MM–175T, 16MM–204T, 20MM–162T)</td>
+        </tr>
+        
+      
+        
+        <tr class="plantgroup">
+          <td class="plant" rowspan="3">Aditya</td>
+          <td class="grade">FE 550</td>
+          <td>1,350</td>
+          <td>388</td>
+          <td>264</td>
+          <td>83</td>
+          <td>41</td>
+          <td>1,269</td>
+          <td><span class="badge b-bad">28</span></td>
+          <td><span class="badge b-warn">19</span></td>
+          <td class="crit"></td>
+        </tr>
+        
+        <tr class="plantgroup">
+          
+          <td class="grade">FE 550D</td>
+          <td>3,850</td>
+          <td>1,552</td>
+          <td>947</td>
+          <td>300</td>
+          <td>605</td>
+          <td>593</td>
+          <td><span class="badge b-good">5</span></td>
+          <td><span class="badge b-good">13</span></td>
+          <td class="crit">FE 550D (8MM–84T, 16MM–107T)</td>
+        </tr>
+        
+        <tr class="plantgroup">
+          
+          <td class="grade">One Helix</td>
+          <td>1,100</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>824</td>
+          <td><span class="badge b-bad">22</span></td>
+          <td><span class="badge b-good">13</span></td>
+          <td class="crit"></td>
+        </tr>
+        
+      
+        
+        <tr class="plantgroup">
+          <td class="plant" rowspan="1">API</td>
+          <td class="grade">FE 550</td>
+          <td>7,300</td>
+          <td>2,268</td>
+          <td>1,364</td>
+          <td>291</td>
+          <td>613</td>
+          <td>3,010</td>
+          <td><span class="badge b-warn">12</span></td>
+          <td><span class="badge b-good">15</span></td>
+          <td class="crit">FE 550 (12MM–147T)</td>
+        </tr>
+        
+      
+        
+        <tr class="plantgroup">
+          <td class="plant" rowspan="2">SKA</td>
+          <td class="grade">FE 550</td>
+          <td>400</td>
+          <td>568</td>
+          <td>504</td>
+          <td>129</td>
+          <td>194</td>
+          <td>480</td>
+          <td><span class="badge b-bad">38</span></td>
+          <td><span class="badge b-warn">24</span></td>
+          <td class="crit">FE 550 (12MM–198T, 20MM–61T)</td>
+        </tr>
+        
+        <tr class="plantgroup">
+          
+          <td class="grade">FE 550D</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>2</td>
+          <td><span class="badge b-good">–</span></td>
+          <td><span class="badge b-bad">318</span></td>
+          <td class="crit"></td>
+        </tr>
+        
+      
+        
+        <tr class="plantgroup">
+          <td class="plant" rowspan="1">German Steel</td>
+          <td class="grade">FE 550D</td>
+          <td>100</td>
+          <td>165</td>
+          <td>39</td>
+          <td>39</td>
+          <td>107</td>
+          <td>260</td>
+          <td><span class="badge b-bad">78</span></td>
+          <td><span class="badge b-bad">220</span></td>
+          <td class="crit">FE 550D (12MM–61T, 16MM–41T)</td>
+        </tr>
+        
+      
+        
+        <tr class="plantgroup">
+          <td class="plant" rowspan="1">AIC</td>
+          <td class="grade">FE 550</td>
+          <td>850</td>
+          <td>856</td>
+          <td>434</td>
+          <td>135</td>
+          <td>287</td>
+          <td>375</td>
+          <td><span class="badge b-warn">13</span></td>
+          <td><span class="badge b-warn">26</span></td>
+          <td class="crit">FE 550 (8MM–111T, 10MM–202T)</td>
+        </tr>
+        
+      
+        
+        <tr class="plantgroup">
+          <td class="plant" rowspan="1">Real Ispat</td>
+          <td class="grade">FE 550D</td>
+          <td>4,650</td>
+          <td>4,045</td>
+          <td>1,230</td>
+          <td>243</td>
+          <td>2,572</td>
+          <td>468</td>
+          <td><span class="badge b-good">3</span></td>
+          <td><span class="badge b-bad">47</span></td>
+          <td class="crit">FE 550D (8MM–184T, 12MM–221T, 20MM–170T, 25MM–88T)</td>
+        </tr>
+        
+      
+      <tr class="total">
+        <td class="left">GRAND TOTAL</td><td></td>
+        <td>33,500</td><td>17,075</td><td>8,562</td>
+        <td>1,960</td><td>6,553</td>
+        <td>12,142</td><td>11</td><td>21</td><td></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="seclabel">
+    <div class="num">03</div>
+    <div class="txt">Retail (Zone-wise) &amp; Project Performance</div>
+    <div class="rule"></div>
+  </div>
+
+  <div class="tblwrap">
+  <table>
+    <thead>
+      <tr>
+        <th class="left" style="width:110px;">Zone</th>
+        <th class="left" style="width:70px;">Type</th>
+        <th>BE</th><th>Orders</th><th>Order % vs BE</th><th>Invoiced</th>
+        <th>Conf. Pend. Inv.</th><th>Pending Orders</th>
+      </tr>
+    </thead>
+    <tbody>
+      
+        
+        <tr class="zonegrp">
+          <td class="left" rowspan="2">North</td>
+          <td class="left">Retail</td>
+          <td>10,400</td>
+          <td>2,786</td>
+          <td><span class="badge b-bad">27%</span></td>
+          <td>1,858</td>
+          <td>420</td>
+          <td>508</td>
+        </tr>
+        
+        <tr class="zonegrp">
+          
+          <td class="left">PTR</td>
+          <td>7,150</td>
+          <td>6,885</td>
+          <td><span class="badge b-good">96%</span></td>
+          <td>3,319</td>
+          <td>896</td>
+          <td>2,470</td>
+        </tr>
+        
+      
+        
+        <tr class="zonegrp">
+          <td class="left" rowspan="2">Central</td>
+          <td class="left">Retail</td>
+          <td>2,650</td>
+          <td>511</td>
+          <td><span class="badge b-bad">19%</span></td>
+          <td>237</td>
+          <td>176</td>
+          <td>15</td>
+        </tr>
+        
+        <tr class="zonegrp">
+          
+          <td class="left">PTR</td>
+          <td>4,350</td>
+          <td>1,607</td>
+          <td><span class="badge b-bad">37%</span></td>
+          <td>811</td>
+          <td>84</td>
+          <td>713</td>
+        </tr>
+        
+      
+        
+        <tr class="zonegrp">
+          <td class="left" rowspan="2">East</td>
+          <td class="left">Retail</td>
+          <td>1,650</td>
+          <td>401</td>
+          <td><span class="badge b-bad">30%</span></td>
+          <td>268</td>
+          <td>56</td>
+          <td>175</td>
+        </tr>
+        
+        <tr class="zonegrp">
+          
+          <td class="left">PTR</td>
+          <td>800</td>
+          <td>118</td>
+          <td><span class="badge b-bad">15%</span></td>
+          <td>108</td>
+          <td>–</td>
+          <td>–</td>
+        </tr>
+        
+      
+        
+        <tr class="zonegrp">
+          <td class="left" rowspan="2">West</td>
+          <td class="left">Retail</td>
+          <td>–</td>
+          <td>25</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+          <td>–</td>
+        </tr>
+        
+        <tr class="zonegrp">
+          
+          <td class="left">PTR</td>
+          <td>–</td>
+          <td>41</td>
+          <td>–</td>
+          <td>41</td>
+          <td>–</td>
+          <td>25</td>
+        </tr>
+        
+      
+      
+      <tr class="zone-head">
+        <td class="left">Retail+PTR</td><td class="left"></td>
+        <td>27,000</td><td>12,262</td>
+        <td><span class="badge b-bad">45%</span></td>
+        <td>6,637</td><td>1,524</td><td>4,101</td>
+      </tr>
+      
+      <tr class="zone-head">
+        <td class="left">Project</td><td class="left"></td>
+        <td>6,500</td><td>4,650</td>
+        <td><span class="badge b-warn">72%</span></td>
+        <td>1,924</td><td>438</td><td>2,290</td>
+      </tr>
+      
+      <tr class="total">
+        <td class="left">GRAND TOTAL</td><td></td>
+        <td>33,500</td><td>17,075</td><td>51%</td>
+        <td>8,562</td><td>1,960</td><td>6,553</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <footer>
+    <div>PB MTD DASHBOARD · SEP-26 · SOURCE: SFDC + PRODUCTION MIS</div>
+    <div>PREPARED BY <b>PRIVATE BRANDS — COMMERCIAL</b> · JSW ONE PLATFORMS LTD.</div>
+  </footer>
+
+</div>
+</body>
+</html>

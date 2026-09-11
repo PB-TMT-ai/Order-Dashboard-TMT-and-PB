@@ -1,0 +1,410 @@
+{
+  "brand_line": "JSW ONE &nbsp;·&nbsp; PRIVATE BRANDS — TMT",
+  "title": "PB MTD Dashboard",
+  "subtitle": "Month-to-Date Snapshot &nbsp;·&nbsp; September 2026 &nbsp;·&nbsp; All Plants",
+  "as_of": "AS ON 11 SEP 2026 &nbsp;·&nbsp; DAY 11/30",
+  "hero_value": "8,562",
+  "hero_label": "MT Invoiced MTD",
+  "mom_note": "Invoice % of BE <b>26%</b> &nbsp;·&nbsp; Dispatch D-1 <b>913 MT</b> &nbsp;·&nbsp; 36.7% of month elapsed",
+  "kpi_section_title": "Key Metrics — MTD Snapshot",
+  "kpis": [
+    {
+      "label": "Latest BE (MT)",
+      "value": "33,500"
+    },
+    {
+      "label": "Orders Received",
+      "value": "17,075"
+    },
+    {
+      "label": "Invoiced MTD",
+      "value": "8,562"
+    },
+    {
+      "label": "Dispatch D-1",
+      "value": "913"
+    },
+    {
+      "label": "Invoice % of BE",
+      "value": "26%"
+    },
+    {
+      "label": "Physical Inventory",
+      "value": "12,142"
+    },
+    {
+      "label": "Production MTD",
+      "value": "9,029"
+    },
+    {
+      "label": "Balance to Produce",
+      "value": "13,171"
+    },
+    {
+      "label": "Expected Closing Inv.",
+      "value": "16,661"
+    },
+    {
+      "label": "Days of Inventory",
+      "value": "11"
+    },
+    {
+      "label": "Ageing (Days)",
+      "value": "21.0"
+    }
+  ],
+  "plant_section_title": "Plant-wise Performance (MT) — by Grade",
+  "plants": [
+    {
+      "name": "Amba-Sikandrabad",
+      "rows": [
+        {
+          "grade": "FE 550",
+          "be": "7,100",
+          "orders": "2,961",
+          "invoiced": "1,273",
+          "conf_pending": "533",
+          "pending_orders": "1,154",
+          "physical_inv": "2,367",
+          "doh": "10",
+          "doh_class": "b-good",
+          "ageing": "12",
+          "ageing_class": "b-good",
+          "critical_dia": "FE 550 (8MM–11T, 12MM–207T, 16MM–101T)"
+        }
+      ]
+    },
+    {
+      "name": "Amba Gwalior",
+      "rows": [
+        {
+          "grade": "FE 550",
+          "be": "–",
+          "orders": "–",
+          "invoiced": "–",
+          "conf_pending": "–",
+          "pending_orders": "–",
+          "physical_inv": "37",
+          "doh": "–",
+          "doh_class": "b-good",
+          "ageing": "205",
+          "ageing_class": "b-bad",
+          "critical_dia": ""
+        },
+        {
+          "grade": "FE 550D",
+          "be": "5,100",
+          "orders": "4,313",
+          "invoiced": "2,780",
+          "conf_pending": "544",
+          "pending_orders": "981",
+          "physical_inv": "1,503",
+          "doh": "9",
+          "doh_class": "b-good",
+          "ageing": "10",
+          "ageing_class": "b-good",
+          "critical_dia": "FE 550D (10MM–175T, 16MM–204T, 20MM–162T)"
+        }
+      ]
+    },
+    {
+      "name": "Aditya",
+      "rows": [
+        {
+          "grade": "FE 550",
+          "be": "1,350",
+          "orders": "388",
+          "invoiced": "264",
+          "conf_pending": "83",
+          "pending_orders": "41",
+          "physical_inv": "1,269",
+          "doh": "28",
+          "doh_class": "b-bad",
+          "ageing": "19",
+          "ageing_class": "b-warn",
+          "critical_dia": ""
+        },
+        {
+          "grade": "FE 550D",
+          "be": "3,850",
+          "orders": "1,552",
+          "invoiced": "947",
+          "conf_pending": "300",
+          "pending_orders": "605",
+          "physical_inv": "593",
+          "doh": "5",
+          "doh_class": "b-good",
+          "ageing": "13",
+          "ageing_class": "b-good",
+          "critical_dia": "FE 550D (8MM–84T, 16MM–107T)"
+        },
+        {
+          "grade": "One Helix",
+          "be": "1,100",
+          "orders": "–",
+          "invoiced": "–",
+          "conf_pending": "–",
+          "pending_orders": "–",
+          "physical_inv": "824",
+          "doh": "22",
+          "doh_class": "b-bad",
+          "ageing": "13",
+          "ageing_class": "b-good",
+          "critical_dia": ""
+        }
+      ]
+    },
+    {
+      "name": "API",
+      "rows": [
+        {
+          "grade": "FE 550",
+          "be": "7,300",
+          "orders": "2,268",
+          "invoiced": "1,364",
+          "conf_pending": "291",
+          "pending_orders": "613",
+          "physical_inv": "3,010",
+          "doh": "12",
+          "doh_class": "b-warn",
+          "ageing": "15",
+          "ageing_class": "b-good",
+          "critical_dia": "FE 550 (12MM–147T)"
+        }
+      ]
+    },
+    {
+      "name": "SKA",
+      "rows": [
+        {
+          "grade": "FE 550",
+          "be": "400",
+          "orders": "568",
+          "invoiced": "504",
+          "conf_pending": "129",
+          "pending_orders": "194",
+          "physical_inv": "480",
+          "doh": "38",
+          "doh_class": "b-bad",
+          "ageing": "24",
+          "ageing_class": "b-warn",
+          "critical_dia": "FE 550 (12MM–198T, 20MM–61T)"
+        },
+        {
+          "grade": "FE 550D",
+          "be": "–",
+          "orders": "–",
+          "invoiced": "–",
+          "conf_pending": "–",
+          "pending_orders": "–",
+          "physical_inv": "2",
+          "doh": "–",
+          "doh_class": "b-good",
+          "ageing": "318",
+          "ageing_class": "b-bad",
+          "critical_dia": ""
+        }
+      ]
+    },
+    {
+      "name": "German Steel",
+      "rows": [
+        {
+          "grade": "FE 550D",
+          "be": "100",
+          "orders": "165",
+          "invoiced": "39",
+          "conf_pending": "39",
+          "pending_orders": "107",
+          "physical_inv": "260",
+          "doh": "78",
+          "doh_class": "b-bad",
+          "ageing": "220",
+          "ageing_class": "b-bad",
+          "critical_dia": "FE 550D (12MM–61T, 16MM–41T)"
+        }
+      ]
+    },
+    {
+      "name": "AIC",
+      "rows": [
+        {
+          "grade": "FE 550",
+          "be": "850",
+          "orders": "856",
+          "invoiced": "434",
+          "conf_pending": "135",
+          "pending_orders": "287",
+          "physical_inv": "375",
+          "doh": "13",
+          "doh_class": "b-warn",
+          "ageing": "26",
+          "ageing_class": "b-warn",
+          "critical_dia": "FE 550 (8MM–111T, 10MM–202T)"
+        }
+      ]
+    },
+    {
+      "name": "Real Ispat",
+      "rows": [
+        {
+          "grade": "FE 550D",
+          "be": "4,650",
+          "orders": "4,045",
+          "invoiced": "1,230",
+          "conf_pending": "243",
+          "pending_orders": "2,572",
+          "physical_inv": "468",
+          "doh": "3",
+          "doh_class": "b-good",
+          "ageing": "47",
+          "ageing_class": "b-bad",
+          "critical_dia": "FE 550D (8MM–184T, 12MM–221T, 20MM–170T, 25MM–88T)"
+        }
+      ]
+    }
+  ],
+  "plant_total": {
+    "be": "33,500",
+    "orders": "17,075",
+    "invoiced": "8,562",
+    "conf_pending": "1,960",
+    "pending_orders": "6,553",
+    "physical_inv": "12,142",
+    "doh": "11",
+    "ageing": "21"
+  },
+  "zone_section_title": "Retail (Zone-wise) &amp; Project Performance",
+  "zones": [
+    {
+      "name": "North",
+      "rows": [
+        {
+          "type": "Retail",
+          "be": "10,400",
+          "orders": "2,786",
+          "order_pct": "27%",
+          "order_pct_class": "b-bad",
+          "invoiced": "1,858",
+          "conf_pending": "420",
+          "pending_orders": "508"
+        },
+        {
+          "type": "PTR",
+          "be": "7,150",
+          "orders": "6,885",
+          "order_pct": "96%",
+          "order_pct_class": "b-good",
+          "invoiced": "3,319",
+          "conf_pending": "896",
+          "pending_orders": "2,470"
+        }
+      ]
+    },
+    {
+      "name": "Central",
+      "rows": [
+        {
+          "type": "Retail",
+          "be": "2,650",
+          "orders": "511",
+          "order_pct": "19%",
+          "order_pct_class": "b-bad",
+          "invoiced": "237",
+          "conf_pending": "176",
+          "pending_orders": "15"
+        },
+        {
+          "type": "PTR",
+          "be": "4,350",
+          "orders": "1,607",
+          "order_pct": "37%",
+          "order_pct_class": "b-bad",
+          "invoiced": "811",
+          "conf_pending": "84",
+          "pending_orders": "713"
+        }
+      ]
+    },
+    {
+      "name": "East",
+      "rows": [
+        {
+          "type": "Retail",
+          "be": "1,650",
+          "orders": "401",
+          "order_pct": "30%",
+          "order_pct_class": "b-bad",
+          "invoiced": "268",
+          "conf_pending": "56",
+          "pending_orders": "175"
+        },
+        {
+          "type": "PTR",
+          "be": "800",
+          "orders": "118",
+          "order_pct": "15%",
+          "order_pct_class": "b-bad",
+          "invoiced": "108",
+          "conf_pending": "–",
+          "pending_orders": "–"
+        }
+      ]
+    },
+    {
+      "name": "West",
+      "rows": [
+        {
+          "type": "Retail",
+          "be": "–",
+          "orders": "25",
+          "order_pct": "",
+          "invoiced": "–",
+          "conf_pending": "–",
+          "pending_orders": "–"
+        },
+        {
+          "type": "PTR",
+          "be": "–",
+          "orders": "41",
+          "order_pct": "",
+          "invoiced": "41",
+          "conf_pending": "–",
+          "pending_orders": "25"
+        }
+      ]
+    }
+  ],
+  "zone_subtotals": [
+    {
+      "name": "Retail+PTR",
+      "be": "27,000",
+      "orders": "12,262",
+      "order_pct": "45%",
+      "order_pct_class": "b-bad",
+      "invoiced": "6,637",
+      "conf_pending": "1,524",
+      "pending_orders": "4,101"
+    },
+    {
+      "name": "Project",
+      "be": "6,500",
+      "orders": "4,650",
+      "order_pct": "72%",
+      "order_pct_class": "b-warn",
+      "invoiced": "1,924",
+      "conf_pending": "438",
+      "pending_orders": "2,290"
+    }
+  ],
+  "zone_total": {
+    "be": "33,500",
+    "orders": "17,075",
+    "order_pct": "51%",
+    "invoiced": "8,562",
+    "conf_pending": "1,960",
+    "pending_orders": "6,553"
+  },
+  "footer_left": "PB MTD DASHBOARD · SEP-26 · SOURCE: SFDC + PRODUCTION MIS",
+  "footer_right": "PREPARED BY <b>PRIVATE BRANDS — COMMERCIAL</b> · JSW ONE PLATFORMS LTD."
+}
