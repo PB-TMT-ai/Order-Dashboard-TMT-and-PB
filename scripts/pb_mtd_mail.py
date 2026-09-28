@@ -632,7 +632,7 @@ th{background:#0E2A47;color:#fff;font-size:10.5px;letter-spacing:.06em;font-weig
 th.t,td.t{text-align:left}
 td{padding:8px 8px;border-bottom:1px solid #E6EAEF;text-align:right;white-space:nowrap}
 td.p{font-weight:700;border-right:1px solid #E6EAEF;white-space:normal;width:150px}
-td.g{color:#5A6878}td.dia{font-size:10px;color:#5A6878;white-space:normal;max-width:220px;text-align:left}
+td.g{color:#5A6878}td.dia{font-size:10px;line-height:1.35;color:#8A2A1F;white-space:normal;width:230px;text-align:left;vertical-align:middle;border-left:1px solid #E6EAEF}
 tr.tot td{background:#0E2A47;color:#fff;font-weight:700;font-size:13px;border:0;padding:12px 8px}
 tr.tot td:first-child{border-top:2px solid #E07A2E}tr.tot td{border-top:2px solid #E07A2E}
 tr.sub td{background:#F3F6F9;font-weight:700}
@@ -739,10 +739,14 @@ def build_snapshot_html(rep: MtdReport) -> str:
     o.append("<table><tr>" + "".join(f'<th class="{c}">{h}</th>' for h, c in heads) + "</tr>")
     p = rep.plants
     spans = p.groupby("Plant", sort=False).size().to_dict()
+    # Critical Dia is per plant (merged cell in the source): join the plant's rows
+    dia = {k: "<br>".join(e(x) for x in v if x)
+           for k, v in p.groupby("Plant", sort=False)["Critical Dia"]}
     seen: set[str] = set()
     for _, r in p.iterrows():
         o.append("<tr>")
-        if r["Plant"] not in seen:
+        first = r["Plant"] not in seen
+        if first:
             seen.add(r["Plant"])
             o.append(f'<td class="p t" rowspan="{spans[r["Plant"]]}">{e(r["Plant"])}</td>')
         comp = r["PO Compliance"] if (r["PO Issued"] or 0) > 0 else None
@@ -754,7 +758,8 @@ def build_snapshot_html(rep: MtdReport) -> str:
                  + f"<td>{_pill(r['Ageing'], AGEING_BANDS)}</td>"
                  + f"<td>{_n(r['PO Issued'])}</td><td>{_n(r['PO Prod'])}</td>"
                  + f"<td>{_n(comp, pct=True)}</td>"
-                 + f'<td class="dia">{e(r["Critical Dia"])}</td></tr>')
+                 + (f'<td class="dia" rowspan="{spans[r["Plant"]]}">{dia[r["Plant"]]}</td>'
+                    if first else "") + "</tr>")
     o.append('<tr class="tot"><td class="t" colspan="2">GRAND TOTAL — ALL PLANTS</td>'
              + "".join(f"<td>{_n(t[c])}</td>" for c in
                        ("BE", "Orders", "Invoiced", "Conf Pending Invoice",
