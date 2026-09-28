@@ -17,7 +17,8 @@ HTML body + formatted Excel attachment (+ optional PNG snapshot).
 ## Scripts to Use
 1. `scripts/pb_mtd_mail.py build <input.xlsx> --out <dir> [--png]`
    → `PB_MTD_Dashboard_<dd-Mon-yyyy>.xlsx`, `PB_MTD_Mail_<dd-Mon-yyyy>.html`,
-   `PB_MTD_Mail_<dd-Mon-yyyy>.eml` (unsent draft with xlsx attached), optional `.png`.
+   `PB_MTD_Mail_<dd-Mon-yyyy>.eml` (unsent draft with xlsx attached), optional `.png`
+   (`--png`: dashboard only, no greeting, tightly cropped at 2x — paste straight into a mail).
 
 ## Steps
 1. Update the input workbook with today's numbers (copy yesterday's, overwrite).

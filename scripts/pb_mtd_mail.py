@@ -459,16 +459,18 @@ def _section(title: str, colspan: int) -> str:
             f'{html.escape(title)}</td></tr>')
 
 
-def build_html(rep: MtdReport) -> str:
+def build_html(rep: MtdReport, *, letter: bool = True) -> str:
+    """Mail body. letter=False drops greeting/sign-off (used for the PNG image)."""
     e = html.escape
     t = rep.plant_total
     out: list[str] = [
         '<!DOCTYPE html><html><head><meta charset="utf-8">'
         f"<title>{e(rep.title)}</title></head>"
         '<body style="margin:0;padding:12px;background:#FFFFFF;">',
-        f'<p style="font:13px Calibri,Arial,sans-serif;margin:0 0 10px 0;">Dear All,<br><br>'
-        f"Please find below the PB MTD dashboard as on <b>{e(rep.stamp)}</b> "
-        f"(Excel attached).</p>",
+        (f'<p style="font:13px Calibri,Arial,sans-serif;margin:0 0 10px 0;">Dear All,<br><br>'
+         f"Please find below the PB MTD dashboard as on <b>{e(rep.stamp)}</b> "
+         f"(Excel attached).</p>" if letter else ""),
+        '<div id="dash" style="display:inline-block;background:#FFFFFF;padding:8px;">',
         f'<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
         f'<tr><td style="font:bold 16px Calibri,Arial,sans-serif;color:#{NAVY};'
         f'padding:4px 0 8px 0;">{e(rep.title)}</td></tr></table>',
@@ -562,9 +564,10 @@ def build_html(rep: MtdReport) -> str:
     out.append('<p style="font:10px Calibri,Arial,sans-serif;color:#7F7F7F;margin:4px 0 12px 0;">'
                "All quantities in MT. DOH: ≤7 green · 8–20 amber · 21–30 orange · &gt;30 red. "
                "Ageing: ≤10 green · 11–20 amber · 21–45 orange · &gt;45 red. "
-               "Order % vs BE: 90–110% green · 110–130% amber · &gt;130% red.</p>"
-               '<p style="font:13px Calibri,Arial,sans-serif;margin:0;">Regards,</p>'
-               "</body></html>")
+               "Order % vs BE: 90–110% green · 110–130% amber · &gt;130% red.</p></div>"
+               + ('<p style="font:13px Calibri,Arial,sans-serif;margin:0;">Regards,</p>'
+                  if letter else "")
+               + "</body></html>")
     return "".join(out)
 
 
@@ -590,7 +593,8 @@ def build_eml(rep: MtdReport, body_html: str, xlsx: Path, out: Path, *,
     return out
 
 
-def render_png(html_path: Path, png: Path) -> Path:
+def render_png(body_html: str, png: Path) -> Path:
+    """Screenshot just the dashboard block (#dash), tightly cropped, at 2x."""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         try:
@@ -601,8 +605,8 @@ def render_png(html_path: Path, png: Path) -> Path:
                 raise
             b = pw.chromium.launch(executable_path=str(exe))
         page = b.new_page(viewport={"width": 1400, "height": 900}, device_scale_factor=2)
-        page.goto(html_path.resolve().as_uri())
-        page.screenshot(path=str(png), full_page=True)
+        page.set_content(body_html)
+        page.locator("#dash").screenshot(path=str(png))
         b.close()
     return png
 
@@ -647,7 +651,7 @@ def build_pack(inp: Path, out_dir: Path, *, to: str = "", cc: str = "", sender: 
     files["eml"] = build_eml(rep, body, files["xlsx"], out_dir / f"PB_MTD_Mail_{rep.stamp}.eml",
                              to=to, cc=cc, sender=sender)
     if png:
-        files["png"] = render_png(files["html"], out_dir / f"PB_MTD_Dashboard_{rep.stamp}.png")
+        files["png"] = render_png(build_html(rep, letter=False), out_dir / f"PB_MTD_Dashboard_{rep.stamp}.png")
     return rep, files
 
 
