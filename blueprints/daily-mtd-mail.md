@@ -58,3 +58,13 @@ Net to Serve / Exp Closing pills: < 0 red · amber below green-from · green fro
 - Plant names: Amba-Sikandrabad → Ambashakti Industries; Amba Gwalior → Ambashakti Udyog – Gwalior;
   Aditya → Aditya Industries; API → API Ispat & Powertech; SKA → SKA Ispat;
   German Steel → German Green Steel & Power; AIC → AIC Iron Industries
+
+## Daily PNG from the "PB MTD DASHBOARD" sheet (current daily deliverable)
+Use `scripts/pb_daily_png.py` when the source is the daily PB MTD Dashboard sheet/screenshot.
+It uses ONLY that sheet's fields (no Expected Orders / Exp BTR per plant / Net to Serve),
+in the PB TMT Update design, up to the grade-wise summary.
+1. `python scripts/pb_daily_png.py template in.xlsx` (or copy yesterday's input)
+2. Fill Meta (KPI tiles), Plant (table rows as in the sheet, same plant names), Grade (the
+   small grade notes under the KPI tiles: Production, BTR, Exp Closing, DOH, Ageing)
+3. `python scripts/pb_daily_png.py build in.xlsx` → `PB_MTD_Dashboard_<date>.png/.html`
+4. Read WARNING lines (row Orders ≠ Invoiced + Conf + Pending; grade notes ≠ Meta totals)
