@@ -1,45 +1,48 @@
-# Blueprint: PB MTD Dashboard — daily mail
+# Blueprint: PB TMT Update — daily mail
 
 ## Goal
-Produce the daily "PB MTD DASHBOARD — <MON-YY> (As on <date>)" mail: Outlook-ready
-HTML body + formatted Excel attachment (+ optional PNG snapshot).
+Produce the daily "PB TMT Update — <d Mon yyyy>" mail: designed PNG snapshot inline in an
+Outlook draft, with the same numbers attached as Excel.
 
 ## Inputs Required
-- input workbook (.xlsx) with sheets `Meta`, `Plant`, `Zone`.
-  Create a blank one: `python scripts/pb_mtd_mail.py template PB_MTD_Input.xlsx`
-  - `Meta`: as_on (dd-mm-yyyy), latest_be (blank = sum of plant BE), dispatch_d1,
-    btr, expected_closing_inv, doh, ageing, prev_month_invoiced (MT)
-  - `Plant`: one row per plant × grade. Leave Plant blank to repeat the row above
-    (like merged cells). Pending Orders blank → Orders − Invoiced − Conf Pending.
-  - `Zone`: North/Central/East/West × Retail/PTR rows + one `Project` row.
-- optional: `--to`, `--cc`, `--sender` for the draft mail headers
+- input workbook (.xlsx), sheets `Meta` + `Plant`.
+  Blank one: `python scripts/pb_mtd_mail.py template PB_TMT_Update_Input.xlsx`
+  - `Meta`: as_on (dd-mm-yyyy), prepared_by, latest_be (blank = Σ plant BE); fallbacks used
+    only when the Plant column is blank: do_released, exp_btr_comp, exp_closing
+  - `Plant` (one row per plant × grade; blank Plant = row above):
+    Plant, Grade, BE, Exp Orders, Orders MTD, Invoiced, Pending to Serve, Physical Inv,
+    Exp BTR Comp, Exp Closing, Inventory Issue, PO Issued, Production MTD, DO Released
+- optional: `--to`, `--cc`, `--sender` for the draft headers
 
 ## Scripts to Use
-1. `scripts/pb_mtd_mail.py build <input.xlsx> --out <dir> [--png]`
-   → `PB_MTD_Dashboard_<dd-Mon-yyyy>.xlsx`, `PB_MTD_Mail_<dd-Mon-yyyy>.html`,
-   `PB_MTD_Mail_<dd-Mon-yyyy>.eml` (unsent draft with xlsx attached), optional `.png`
-   (`--png`: designed snapshot — navy header, KPI cards with grade splits, plant table,
-   grade-wise summary, footer; no zone section; 2x. `Meta.prepared_by` fills the footer name).
+1. `scripts/pb_mtd_mail.py build <input.xlsx> --out <dir>` →
+   `PB_TMT_Update_<dd-Mon-yyyy>.png|.html|.xlsx|.eml`
 
 ## Steps
-1. Update the input workbook with today's numbers (copy yesterday's, overwrite).
-2. Run `build`; read every `WARNING:` line on stderr before sending.
-3. Send: double-click the `.eml` → it opens in Outlook as a draft → Send.
-   Or: open the `.html` in a browser, Ctrl+A, Ctrl+C, paste into a new mail, attach the `.xlsx`.
+1. Copy yesterday's input, overwrite the numbers.
+2. Run `build`; read every `WARNING:` line before sending.
+3. Double-click the `.eml` → Outlook draft (PNG in body, xlsx attached) → add recipients → Send.
 
 ## Derived, never typed
-KPI totals (from Plant sheet), Invoice % of BE, Production MTD (= Σ PO Prod),
-PO Compliance (PO Prod / PO Issued), Order % vs BE, Retail+PTR subtotal, Grand totals.
+- Pending to Serve (if blank) = max(Orders MTD − Invoiced, 0)
+- Net to Serve = Physical Inv − Pending to Serve (verified on every row of the 25-Sep report)
+- Invoice % of BE, all totals, per-grade card splits, grade-wise summary
+- Header line: total serving gap, then each grade with open orders — "short X MT (worst 2
+  plants)" first, then "covered +X MT"
 
-## Edge Cases
-- Zone rows don't sum to the plant grand total (> 5 MT on any column): an `Unmapped`
-  row is added so the table still ties; a warning says by how much. Find the missing
-  zone/channel in the source instead of leaving it.
-- Pending Orders typed but ≠ Orders − Invoiced − Conf (> 2 MT): warning, typed value kept.
-- Totals are sums of the typed rows: if the source rounds per row, totals can differ by
-  a few MT from the source's own total. Paste unrounded values to avoid this.
+## Not derivable — must be typed
+Exp Orders, Exp BTR Comp, Exp Closing (not a fixed formula: most rows ≈ Physical + BTR −
+(Exp Orders − Invoiced), but AIC / Gwalior / Ambashakti / SKA 550 differ), DO Released,
+Inventory Issue. Blank → shown as "–".
 
 ## Colour rules (constants at top of script)
-DOH ≤7 green · 8–20 amber · 21–30 orange · >30 red.
-Ageing ≤10 green · 11–20 amber · 21–45 orange · >45 red.
-Order % vs BE 90–110% green · 110–130% amber · >130% red · <90% no fill.
+Net to Serve / Exp Closing pills: < 0 red · amber below green-from · green from 1,000 MT
+(Net to Serve) / 750 MT (Exp Closing) — matches the 25-Sep reference.
+
+## Edge Cases
+- Inventory Issue accepts "FE 550 (8MM-46T, 10MM-10T)" or "FE 550 · 8MM (46T)" — normalised.
+- Rows with no numbers (e.g. an unused grade) are dropped.
+- No browser for PNG → warning; xlsx/html/eml still built (eml without image).
+
+## Golden test
+`tests/unit/test_pb_mtd_mail.py` rebuilds the 25-Sep report and asserts every total.

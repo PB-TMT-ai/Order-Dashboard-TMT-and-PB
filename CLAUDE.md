@@ -52,7 +52,7 @@ Top-level Python modules (the app):
 Supporting dirs:
 
 - `/blueprints` — task SOPs (check FIRST)
-- `/scripts` — tested automation scripts (`pb_mtd_mail.py`: PB MTD daily mail pack — see `blueprints/daily-mtd-mail.md`)
+- `/scripts` — tested automation scripts (`pb_mtd_mail.py`: PB TMT Update daily mail — see `blueprints/daily-mtd-mail.md`)
 - `/tests` — `unit/` + `integration/` (no runner wired up yet)
 - `/.streamlit` — Streamlit config/theme
 - `/.workspace` — temp files, gitignored, never commit

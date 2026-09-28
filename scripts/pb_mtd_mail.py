@@ -1,46 +1,45 @@
-"""PB MTD Dashboard -> daily mail pack.
+"""PB TMT Update -> daily mail pack (plant-wise & grade-wise MTD snapshot).
 
-Builds the "PB MTD DASHBOARD" (key metrics, plant-wise by grade, retail
-zone-wise & project) from one input workbook and writes everything needed for
-the daily mail:
+Builds the daily "PB TMT Update — <d Mon yyyy>" report from one input workbook:
 
-  * PB_MTD_Dashboard_<dd-Mon-yyyy>.xlsx  formatted attachment (values, no formulas,
-                                         so phone / Outlook previews show numbers)
-  * PB_MTD_Mail_<dd-Mon-yyyy>.html       Outlook-safe body (tables + inline CSS)
-  * PB_MTD_Mail_<dd-Mon-yyyy>.eml        unsent draft: body + xlsx attached;
-                                         double-click -> Outlook -> Send
-  * PB_MTD_Dashboard_<dd-Mon-yyyy>.png   optional snapshot (--png, needs Playwright)
+  * PB_TMT_Update_<dd-Mon-yyyy>.png   designed snapshot (the image that goes in the mail)
+  * PB_TMT_Update_<dd-Mon-yyyy>.html  same snapshot as a web page
+  * PB_TMT_Update_<dd-Mon-yyyy>.xlsx  same numbers as a formatted sheet (values, no formulas)
+  * PB_TMT_Update_<dd-Mon-yyyy>.eml   unsent Outlook draft: PNG inline in the body + xlsx
+                                      attached; double-click -> Outlook -> Send
+
+Sections: header (invoiced MTD + open-order serving gap line) · 01 Key metrics
+(12 cards with per-grade splits) · 02 Plant-wise by grade · 03 Grade-wise summary.
 
 Usage:
   python scripts/pb_mtd_mail.py template <input.xlsx>        # blank input workbook
   python scripts/pb_mtd_mail.py build <input.xlsx> --out <dir>
-        [--to a@x.com,b@y.com] [--cc ...] [--sender ...] [--png]
+        [--to a@x.com,b@y.com] [--cc ...] [--sender ...] [--no-png]
 
-Input workbook sheets (see `template`):
-  Meta  : key/value rows - as_on, latest_be (optional), dispatch_d1, btr,
-          expected_closing_inv, doh, ageing, prev_month_invoiced
-  Plant : Plant, Grade, BE, Orders, Invoiced, Conf Pending Invoice,
-          Pending Orders, Physical Inv, DOH, Ageing, Critical Dia,
-          PO Issued, PO Prod
-  Zone  : Zone, Type, BE, Orders, Invoiced, Conf Pending Invoice, Pending Orders
-          (Zone = "Project" for the project row)
+Input workbook:
+  Meta  : as_on, prepared_by, latest_be, do_released, exp_btr_comp, exp_closing
+          (the last three are only fallbacks when the Plant rows leave them blank)
+  Plant : Plant, Grade, BE, Exp Orders, Orders MTD, Invoiced, Pending to Serve,
+          Physical Inv, Exp BTR Comp, Exp Closing, Inventory Issue, PO Issued,
+          Production MTD, DO Released
+          Plant blank = same as row above. Rows with no numbers at all are dropped.
 
-Derived (never typed): KPI totals, Invoice % of BE, Production MTD (= sum of
-PO Prod), PO Compliance, Order % vs BE, Retail+PTR subtotal, Grand totals.
-Pending Orders is computed as Orders - Invoiced - Conf Pending when left blank.
-If the zone rows don't add up to the plant grand total, an "Unmapped" row is
-added so the zone table still ties to the headline numbers.
+Derived, never typed:
+  Pending to Serve (if blank) = max(Orders MTD − Invoiced, 0)
+  Net to Serve                = Physical Inv − Pending to Serve
+  Invoice % of BE, all totals, grade splits, grade-wise summary, header gap line.
 """
 from __future__ import annotations
 
 import argparse
 import html
 import math
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from email.message import EmailMessage
-from email.utils import formatdate
+from email.utils import formatdate, make_msgid
 from pathlib import Path
 from typing import Any
 
@@ -51,61 +50,54 @@ from openpyxl.utils import get_column_letter
 
 # ─── Column contracts ────────────────────────────────────────────────────────
 PLANT_COLS = [
-    "Plant", "Grade", "BE", "Orders", "Invoiced", "Conf Pending Invoice",
-    "Pending Orders", "Physical Inv", "DOH", "Ageing", "Critical Dia",
-    "PO Issued", "PO Prod",
+    "Plant", "Grade", "BE", "Exp Orders", "Orders MTD", "Invoiced", "Pending to Serve",
+    "Physical Inv", "Exp BTR Comp", "Exp Closing", "Inventory Issue", "PO Issued",
+    "Production MTD", "DO Released",
 ]
-ZONE_COLS = [
-    "Zone", "Type", "BE", "Orders", "Invoiced", "Conf Pending Invoice",
-    "Pending Orders",
-]
-QTY = ["BE", "Orders", "Invoiced", "Conf Pending Invoice", "Pending Orders"]
+REQUIRED = ["Plant", "Grade", "BE", "Orders MTD", "Invoiced", "Physical Inv"]
+TEXT_COLS = {"Plant", "Grade", "Inventory Issue"}
+NUM_COLS = [c for c in PLANT_COLS if c not in TEXT_COLS] + ["Net to Serve"]
+# Older sheet headers still accepted
+ALIASES = {"Orders": "Orders MTD", "PO Prod": "Production MTD", "Critical Dia": "Inventory Issue",
+           "Expected Orders": "Exp Orders", "Exp. Orders": "Exp Orders",
+           "Exp. BTR Comp": "Exp BTR Comp", "Exp. Closing": "Exp Closing"}
 META_KEYS = {
     "as_on": "Report date (dd-mm-yyyy)",
-    "latest_be": "Latest BE (MT) - blank = sum of plant BE",
-    "dispatch_d1": "Dispatch D-1 (MT)",
-    "btr": "Balance to produce - BTR (MT)",
-    "expected_closing_inv": "Expected closing inventory (MT)",
-    "doh": "Days of inventory - DOH (overall)",
-    "ageing": "Ageing days (overall)",
-    "prev_month_invoiced": "Prev month invoiced MTD (MT)",
-    "prepared_by": "Prepared by (name shown in PNG footer, optional)",
+    "prepared_by": "Prepared by (footer name)",
+    "latest_be": "Latest BE (MT) — blank = sum of plant BE",
+    "do_released": "DO released (MT) — only if the Plant 'DO Released' column is blank",
+    "exp_btr_comp": "Expected BTR completion (MT) — only if Plant column is blank",
+    "exp_closing": "Expected closing inventory (MT) — only if Plant column is blank",
 }
-META_TEXT = {"prepared_by"}
-# Pending check: |given - (Orders - Invoiced - Conf)| above this -> warning
-PENDING_TOL_MT = 2.0
-# Zone rows vs plant grand total: gap above this (any column) -> "Unmapped" row
-ZONE_TIE_TOL_MT = 5.0
+META_TEXT = {"as_on", "prepared_by"}
+GRADES = ["FE 550", "FE 550D", "One Helix"]
+GRADE_SHORT = {"FE 550": "550", "FE 550D": "550D", "ONE HELIX": "Helix"}
 
-# ─── Traffic-light thresholds (upper bound inclusive -> fill) ────────────────
-GREEN, AMBER, ORANGE, RED = "C6EFCE", "FFEB9C", "F8CBAD", "FFC7CE"
-DOH_BANDS = [(7, GREEN), (20, AMBER), (30, ORANGE), (math.inf, RED)]
-AGEING_BANDS = [(10, GREEN), (20, AMBER), (45, ORANGE), (math.inf, RED)]
-# Order % vs BE: on-plan band green, overshoot amber/red, under-plan unfilled
-ORDER_PCT_BANDS = [(0.90, None), (1.10, GREEN), (1.30, AMBER), (math.inf, RED)]
+# Net to Serve / Exp Closing pills: <0 red · 0..green-from amber · >= green-from green
+GREEN_FROM_MT = {"Net to Serve": 1000.0, "Exp Closing": 750.0}
+PILL_RED, PILL_AMBER, PILL_GREEN = ("FBE1E1", "B42318"), ("FDF1D6", "8A6100"), ("E3F4E8", "1E7B3A")
 
-NAVY, HEAD_BG, TITLE_BG, TOTAL_BG = "002E5D", "DCE6F1", "FCE4D6", "FFC000"
-KPI_GREEN = "00B050"
+NAVY, ORANGE = "0E2A47", "E07A2E"
 
 
-def band(value: float | None, bands: list[tuple[float, str | None]]) -> str | None:
-    if value is None or pd.isna(value):
+def pill_colours(v: float | None, col: str) -> tuple[str, str] | None:
+    if v is None or pd.isna(v):
         return None
-    for upper, colour in bands:
-        if value <= upper:
-            return colour
-    return None
+    if v < 0:
+        return PILL_RED
+    return PILL_GREEN if v >= GREEN_FROM_MT[col] else PILL_AMBER
 
 
 # ─── Model ───────────────────────────────────────────────────────────────────
 @dataclass
-class MtdReport:
+class Report:
     as_on: date
     meta: dict[str, Any]
-    plants: pd.DataFrame           # PLANT_COLS + "PO Compliance"
-    plant_total: dict[str, float]
-    zones: pd.DataFrame            # ZONE_COLS + "Order %", "_kind" (row|subtotal|total)
-    kpi: list[tuple[str, str, str]]  # (label, value, note)
+    plants: pd.DataFrame          # PLANT_COLS + Net to Serve
+    grades: pd.DataFrame          # index = grade, NUM_COLS sums
+    total: dict[str, float | None]
+    cards: list[tuple[str, float | None, str, str]]   # label, value, kind(mt|pct), split html
+    gap_line: str
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -113,16 +105,21 @@ class MtdReport:
         return self.as_on.strftime("%d-%b-%Y")
 
     @property
-    def title(self) -> str:
-        return (f"PB MTD DASHBOARD — {self.as_on.strftime('%b-%y').upper()} "
-                f"(As on {self.stamp})")
+    def day(self) -> str:
+        return f"{self.as_on.day} {self.as_on.strftime('%b %Y')}"
 
 
 def _num(v: Any) -> float | None:
-    if v is None or (isinstance(v, str) and not v.strip()):
+    if v is None or (isinstance(v, str) and v.strip() in ("", "-", "–", "—")):
         return None
     if isinstance(v, str):
-        v = v.replace(",", "").replace("%", "").strip()
+        neg = v.strip().startswith("(") and v.strip().endswith(")")
+        v = v.replace(",", "").replace("(", "").replace(")", "").strip()
+        try:
+            f = float(v)
+        except ValueError:
+            return None
+        return -f if neg else f
     try:
         f = float(v)
     except (TypeError, ValueError):
@@ -141,667 +138,275 @@ def _parse_date(v: Any) -> date:
     return dt.date()
 
 
-def _frame(rows: list[list[Any]], cols: list[str], sheet: str) -> pd.DataFrame:
-    if not rows:
-        raise ValueError(f"Sheet '{sheet}' has no header row")
-    header = [str(c).strip() if c is not None else "" for c in rows[0]]
-    missing = [c for c in cols if c not in header]
-    if missing:
-        raise ValueError(f"Sheet '{sheet}' missing columns: {missing}")
-    idx = [header.index(c) for c in cols]
-    body = [[r[i] if i < len(r) else None for i in idx] for r in rows[1:]]
-    body = [r for r in body if any(v not in (None, "") for v in r)]
-    return pd.DataFrame(body, columns=cols)
-
-
-def read_input(path: Path) -> tuple[date, dict[str, float | None], pd.DataFrame, pd.DataFrame]:
+def read_input(path: Path) -> tuple[date, dict[str, Any], pd.DataFrame]:
     wb = load_workbook(path, data_only=True)
-    for s in ("Meta", "Plant", "Zone"):
+    for s in ("Meta", "Plant"):
         if s not in wb.sheetnames:
             raise ValueError(f"Input workbook needs a '{s}' sheet (has {wb.sheetnames})")
-    meta_raw = {str(r[0]).strip(): r[1] for r in wb["Meta"].iter_rows(min_row=2, values_only=True)
-                if r and r[0] is not None}
-    if not meta_raw.get("as_on"):
+    raw = {str(r[0]).strip(): r[1] for r in wb["Meta"].iter_rows(min_row=2, values_only=True)
+           if r and r[0] is not None}
+    if not raw.get("as_on"):
         raise ValueError("Meta.as_on is required")
-    as_on = _parse_date(meta_raw["as_on"])
-    meta: dict[str, Any] = {k: _num(meta_raw.get(k)) for k in META_KEYS
-                            if k != "as_on" and k not in META_TEXT}
-    meta.update({k: str(meta_raw.get(k) or "").strip() for k in META_TEXT})
-    plants = _frame(list(wb["Plant"].iter_rows(values_only=True)), PLANT_COLS, "Plant")
-    zones = _frame(list(wb["Zone"].iter_rows(values_only=True)), ZONE_COLS, "Zone")
-    return as_on, meta, plants, zones
+    meta: dict[str, Any] = {k: _num(raw.get(k)) for k in META_KEYS if k not in META_TEXT}
+    meta["prepared_by"] = str(raw.get("prepared_by") or "").strip()
+
+    rows = list(wb["Plant"].iter_rows(values_only=True))
+    header = [ALIASES.get(str(c).strip(), str(c).strip()) if c is not None else "" for c in rows[0]]
+    missing = [c for c in REQUIRED if c not in header]
+    if missing:
+        raise ValueError(f"Sheet 'Plant' missing columns: {missing}")
+    data = {c: [r[header.index(c)] if c in header and header.index(c) < len(r) else None
+                for r in rows[1:]] for c in PLANT_COLS}
+    df = pd.DataFrame(data)
+    df = df[df.apply(lambda r: any(v not in (None, "") for v in r), axis=1)].reset_index(drop=True)
+    return _parse_date(raw["as_on"]), meta, df
 
 
 # ─── Derivations ─────────────────────────────────────────────────────────────
-def _fmt_mt(v: float | None) -> str:
-    return "" if v is None or pd.isna(v) else f"{v:,.0f}"
+def _sum(s: pd.Series) -> float | None:
+    return None if s.isna().all() else float(s.sum())
 
 
-def _fmt_pct(v: float | None) -> str:
-    return "" if v is None or pd.isna(v) else f"{v * 100:.0f}%"
-
-
-def _fmt_pct1(v: float | None) -> str:
-    return "" if v is None or pd.isna(v) else f"{v * 100:.1f}%"
-
-
-def _fmt_days(v: float | None) -> str:
+def _mt(v: float | None) -> str:
+    """Report number: blank -> en dash, negatives in (parentheses)."""
     if v is None or pd.isna(v):
-        return ""
-    return f"{v:.1f}" if v != round(v) else f"{v:.0f}"
+        return "–"
+    t = f"{abs(v):,.0f}"
+    return f"({t})" if round(v) < 0 else t
 
 
-def derive(as_on: date, meta: dict[str, float | None],
-           plants: pd.DataFrame, zones: pd.DataFrame) -> MtdReport:
+def _pct(v: float | None) -> str:
+    return "–" if v is None or pd.isna(v) else f"{v * 100:.0f}%"
+
+
+def _signed(v: float) -> str:
+    return f"+{v:,.0f}" if v >= 0 else f"-{abs(v):,.0f}"
+
+
+def _grade_key(g: str) -> int:
+    up = g.upper()
+    return next((i for i, x in enumerate(GRADES) if x.upper() == up), 99)
+
+
+def _short_plant(name: str) -> str:
+    """'Ambashakti Udyog – Gwalior' -> 'Gwalior', 'Real Ispat' -> 'Real'."""
+    if "–" in name or " - " in name:
+        return re.split(r"\s*[–-]\s*", name)[-1]
+    return name.split()[0]
+
+
+def derive(as_on: date, meta: dict[str, Any], plants: pd.DataFrame) -> Report:
     warnings: list[str] = []
     p = plants.copy()
-    p["Plant"] = p["Plant"].ffill().astype(str).str.strip()   # merged-cell style input
+    p["Plant"] = p["Plant"].replace("", None).ffill().astype(str).str.strip()
     p["Grade"] = p["Grade"].fillna("").astype(str).str.strip()
-    p["Critical Dia"] = p["Critical Dia"].fillna("").astype(str).str.strip()
-    num_cols = [c for c in PLANT_COLS if c not in ("Plant", "Grade", "Critical Dia")]
-    for c in num_cols:
-        p[c] = p[c].map(_num)
+    p["Inventory Issue"] = p["Inventory Issue"].fillna("").astype(str).str.strip()
+    vals = [c for c in PLANT_COLS if c not in TEXT_COLS]
+    for c in vals:
+        p[c] = p[c].map(_num).astype(float)
+    p = p[p[vals].fillna(0).ne(0).any(axis=1)].reset_index(drop=True)   # drop all-blank rows
 
-    calc = (p["Orders"].fillna(0) - p["Invoiced"].fillna(0)
-            - p["Conf Pending Invoice"].fillna(0)).clip(lower=0)
-    has_orders = p["Orders"].notna()
-    for i in p.index[p["Pending Orders"].notna() & has_orders]:
-        if abs(p.at[i, "Pending Orders"] - calc[i]) > PENDING_TOL_MT:
-            warnings.append(
-                f"Plant {p.at[i, 'Plant']} / {p.at[i, 'Grade']}: Pending Orders "
-                f"{p.at[i, 'Pending Orders']:,.0f} ≠ Orders − Invoiced − Conf "
-                f"({calc[i]:,.0f}) — check the row")
-    fill = p["Pending Orders"].isna() & has_orders
-    p.loc[fill, "Pending Orders"] = calc[fill]
+    calc = (p["Orders MTD"].fillna(0) - p["Invoiced"].fillna(0)).clip(lower=0)
+    blank = p["Pending to Serve"].isna() & p["Orders MTD"].notna()
+    p.loc[blank, "Pending to Serve"] = calc[blank]
+    p.loc[p["Pending to Serve"] == 0, "Pending to Serve"] = None
+    p["Net to Serve"] = p["Physical Inv"].fillna(0) - p["Pending to Serve"].fillna(0)
+    p.loc[p["Physical Inv"].isna() & p["Pending to Serve"].isna(), "Net to Serve"] = None
 
-    iss = p["PO Issued"]
-    p["PO Compliance"] = (p["PO Prod"].fillna(0) / iss).where(iss.fillna(0) > 0, 0.0)
+    g = p.groupby("Grade", sort=False)[NUM_COLS].agg(_sum)
+    g = g.loc[sorted(g.index, key=_grade_key)]
+    total = {c: _sum(p[c]) for c in NUM_COLS}
 
-    tot = {c: float(p[c].fillna(0).sum()) for c in
-           ["BE", "Orders", "Invoiced", "Conf Pending Invoice", "Pending Orders",
-            "Physical Inv", "PO Issued", "PO Prod"]}
-    tot["PO Compliance"] = tot["PO Prod"] / tot["PO Issued"] if tot["PO Issued"] else 0.0
-    tot["DOH"] = meta.get("doh")
-    tot["Ageing"] = meta.get("ageing")
+    be = meta.get("latest_be") or total["BE"]
+    if meta.get("latest_be") and total["BE"] and abs(meta["latest_be"] - total["BE"]) > 0.5:
+        warnings.append(f"Meta.latest_be {meta['latest_be']:,.0f} ≠ plant BE total {total['BE']:,.0f}")
+    for col, key in (("DO Released", "do_released"), ("Exp BTR Comp", "exp_btr_comp"),
+                     ("Exp Closing", "exp_closing")):
+        if total[col] is None and meta.get(key) is not None:
+            total[col] = meta[key]            # card shows the total, no grade split
+    for col in ("Exp Orders", "Exp BTR Comp", "Exp Closing", "DO Released", "PO Issued",
+                "Production MTD"):
+        if p[col].isna().all():
+            warnings.append(f"'{col}' is blank for every row"
+                            + (" — card uses Meta total" if total[col] is not None else " — shown as –"))
+    if not p["Inventory Issue"].any():
+        warnings.append("Inventory Issue is blank for every row")
 
-    latest_be = meta.get("latest_be")
-    if latest_be is None:
-        latest_be = tot["BE"]
-    elif abs(latest_be - tot["BE"]) > 0.5:
-        warnings.append(f"Meta.latest_be {latest_be:,.0f} ≠ plant BE total {tot['BE']:,.0f}")
+    def split(col: str, *, pct: bool = False) -> str:
+        if p[col].isna().all():
+            return ""
+        out = []
+        for grade, r in g.iterrows():
+            v = (r["Invoiced"] / r["BE"] if r["BE"] else None) if pct else r[col]
+            if v is None or pd.isna(v) or (not pct and round(v) == 0):
+                continue
+            out.append(f"{GRADE_SHORT.get(grade.upper(), grade)} <b>{_pct(v) if pct else _mt(v)}</b>")
+        return " · ".join(out)
 
-    # Zone table: rows -> Retail+PTR subtotal -> Project -> (Unmapped) -> Grand total
-    z = zones.copy()
-    z["Zone"] = z["Zone"].ffill().fillna("").astype(str).str.strip()
-    z["Type"] = z["Type"].fillna("").astype(str).str.strip()
-    for c in QTY:
-        z[c] = z[c].map(_num)
-    is_proj = z["Zone"].str.lower().eq("project")
-    retail, proj = z[~is_proj].copy(), z[is_proj].copy()
-    retail["_kind"], proj["_kind"] = "row", "row"
-    sub = {"Zone": "Retail+PTR", "Type": "", "_kind": "subtotal",
-           **{c: float(retail[c].fillna(0).sum()) for c in QTY}}
-    parts = [retail, pd.DataFrame([sub]), proj]
-    zsum = {c: sub[c] + float(proj[c].fillna(0).sum()) for c in QTY}
-    gap = {c: tot[c] - zsum[c] for c in QTY}
-    if any(abs(v) > ZONE_TIE_TOL_MT for v in gap.values()):
-        shown = {c: (v if abs(v) > ZONE_TIE_TOL_MT else None) for c, v in gap.items()}
-        parts.append(pd.DataFrame([{"Zone": "Unmapped", "Type": "", "_kind": "row", **shown}]))
-        warnings.append(
-            "Zone table doesn't tie to plant totals — added 'Unmapped' row: "
-            + ", ".join(f"{c} {v:+,.0f}" for c, v in gap.items() if abs(v) > ZONE_TIE_TOL_MT))
-    parts.append(pd.DataFrame([{"Zone": "GRAND TOTAL", "Type": "", "_kind": "total",
-                                **{c: tot[c] for c in QTY}}]))
-    zt = pd.concat(parts, ignore_index=True)
-    be = zt["BE"]
-    zt["Order %"] = (zt["Orders"] / be).where(be.fillna(0) > 0)
-
-    prev = meta.get("prev_month_invoiced")
-    inv_pct = tot["Invoiced"] / latest_be if latest_be else None
-    kpi = [
-        ("Latest BE (MT)", _fmt_mt(latest_be), ""),
-        ("Total Orders Received (MT)", _fmt_mt(tot["Orders"]), ""),
-        ("Invoiced MTD (MT)", _fmt_mt(tot["Invoiced"]),
-         f"Prev Month Invoiced (MTD): {prev / 1000:.1f} KMT" if prev else ""),
-        ("Dispatch D-1 (MT)", _fmt_mt(meta.get("dispatch_d1")), ""),
-        ("Invoice % of BE", _fmt_pct(inv_pct), ""),
-        ("Physical Inventory (MT)", _fmt_mt(tot["Physical Inv"]), ""),
-        ("Production MTD (MT)", _fmt_mt(tot["PO Prod"]), ""),
-        ("Balance to Produce (BTR) (MT)", _fmt_mt(meta.get("btr")), ""),
-        ("Expected Closing Inv (MT)", _fmt_mt(meta.get("expected_closing_inv")), ""),
-        ("Days of Inventory — DOH", _fmt_days(meta.get("doh")), ""),
-        ("Ageing (Days)", _fmt_days(meta.get("ageing")), ""),
-    ]
-    for k in ("dispatch_d1", "btr", "expected_closing_inv", "doh", "ageing"):
-        if meta.get(k) is None:
-            warnings.append(f"Meta.{k} is blank — KPI tile will be empty")
-    return MtdReport(as_on, meta, p, tot, zt, kpi, warnings)
-
-
-# ─── Excel attachment ────────────────────────────────────────────────────────
-_thin = Side(style="thin", color="A6A6A6")
-BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
-CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-RIGHT = Alignment(horizontal="right", vertical="center")
-LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
-
-
-def _fill(hex_: str | None) -> PatternFill:
-    return PatternFill("solid", fgColor=hex_) if hex_ else PatternFill(fill_type=None)
-
-
-def _put(ws, r: int, c: int, v: Any, *, fmt: str | None = None, bold: bool = False,
-         bg: str | None = None, align: Alignment = RIGHT, color: str = "000000",
-         size: int = 10) -> None:
-    cell = ws.cell(row=r, column=c)
-    cell.value = None if v is None or (isinstance(v, float) and pd.isna(v)) else v
-    cell.font = Font(name="Calibri", size=size, bold=bold, color=color)
-    cell.alignment = align
-    cell.border = BORDER
-    if bg:
-        cell.fill = _fill(bg)
-    if fmt:
-        cell.number_format = fmt
-
-
-def _band_row(ws, r: int, c1: int, c2: int, text: str) -> None:
-    ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
-    _put(ws, r, c1, text, bold=True, bg=TITLE_BG, align=CENTER, size=11)
-    for c in range(c1 + 1, c2 + 1):
-        ws.cell(row=r, column=c).border = BORDER
-
-
-MT, PCT0, PCT1 = "#,##0", "0%", "0.0%"
-
-
-def build_xlsx(rep: MtdReport, out: Path) -> Path:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "PB MTD"
-    ws.sheet_view.showGridLines = False
-    widths = [16, 11, 10, 10, 10, 11, 13, 11, 8, 9, 34, 2, 11, 11, 12]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-    r = 1
-    _band_row(ws, r, 1, 15, rep.title)
-    ws.row_dimensions[r].height = 22
-    ws.cell(row=r, column=1).font = Font(name="Calibri", size=14, bold=True, color=NAVY)
-
-    # ① KPIs — 11 tiles across A..K
-    r = 3
-    _band_row(ws, r, 1, 11, "① KEY METRICS — MTD SNAPSHOT")
-    raw = {
-        0: (rep.meta.get("latest_be") or rep.plant_total["BE"], MT),
-        1: (rep.plant_total["Orders"], MT), 2: (rep.plant_total["Invoiced"], MT),
-        3: (rep.meta.get("dispatch_d1"), MT),
-        4: (rep.plant_total["Invoiced"] / (rep.meta.get("latest_be") or rep.plant_total["BE"] or 1), PCT0),
-        5: (rep.plant_total["Physical Inv"], MT), 6: (rep.plant_total["PO Prod"], MT),
-        7: (rep.meta.get("btr"), MT), 8: (rep.meta.get("expected_closing_inv"), MT),
-        9: (rep.meta.get("doh"), "0"), 10: (rep.meta.get("ageing"), "0.0"),
-    }
-    for i, (label, _, note) in enumerate(rep.kpi):
-        c = i + 1
-        _put(ws, r + 1, c, label, bold=True, bg=HEAD_BG, align=CENTER, size=8)
-        v, fmt = raw[i]
-        _put(ws, r + 2, c, v, fmt=fmt, bold=True, align=CENTER, color=KPI_GREEN, size=16)
-        _put(ws, r + 3, c, note or None, align=CENTER, size=7, color="C00000")
-    ws.row_dimensions[r + 1].height = 34
-    ws.row_dimensions[r + 2].height = 30
-    ws.row_dimensions[r + 3].height = 22
-
-    # ② Plant-wise + PO block (M..O)
-    r = 8
-    _band_row(ws, r, 1, 11, "② PLANT-WISE PERFORMANCE (MT) — BY GRADE")
-    _band_row(ws, r, 13, 15, "PO STATUS (MT)")
-    heads = ["Plant", "Grade", "BE", "Orders", "Invoiced", "Conf. Pending Invoice",
-             "Pending Orders (Non-Conf+SFDC)", "Physical Inv", "DOH", "Ageing (Days)",
-             "Critical Dia"]
-    for c, h in enumerate(heads, 1):
-        _put(ws, r + 1, c, h, bold=True, bg=HEAD_BG, align=CENTER)
-    for c, h in zip((13, 14, 15), ("PO Issued", "PO Prod", "PO Compliance")):
-        _put(ws, r + 1, c, h, bold=True, bg=HEAD_BG, align=CENTER)
-    ws.row_dimensions[r + 1].height = 30
-
-    r0 = r + 2
-    for i, (_, d) in enumerate(rep.plants.iterrows()):
-        rr = r0 + i
-        vals = [d["Plant"], d["Grade"], d["BE"], d["Orders"], d["Invoiced"],
-                d["Conf Pending Invoice"], d["Pending Orders"], d["Physical Inv"],
-                d["DOH"], d["Ageing"], d["Critical Dia"] or None]
-        for c, v in enumerate(vals, 1):
-            bg = (band(v, DOH_BANDS) if c == 9 else
-                  band(v, AGEING_BANDS) if c == 10 else None)
-            _put(ws, rr, c, v, fmt=MT if 3 <= c <= 10 else None, bg=bg,
-                 align=LEFT if c in (1, 2, 11) else RIGHT,
-                 bold=c == 1, size=8 if c == 11 else 10,
-                 color="C00000" if c == 11 else "000000")
-        _put(ws, rr, 13, d["PO Issued"], fmt=MT)
-        _put(ws, rr, 14, d["PO Prod"], fmt=MT)
-        _put(ws, rr, 15, d["PO Compliance"], fmt=PCT1)
-    # merge Plant cells for consecutive rows of the same plant
-    names = list(rep.plants["Plant"])
-    start = 0
-    for i in range(1, len(names) + 1):
-        if i == len(names) or names[i] != names[start]:
-            if i - start > 1:
-                ws.merge_cells(start_row=r0 + start, start_column=1,
-                               end_row=r0 + i - 1, end_column=1)
-            start = i
-    rt = r0 + len(names)
-    t = rep.plant_total
-    tot_vals = ["GRAND TOTAL", None, t["BE"], t["Orders"], t["Invoiced"],
-                t["Conf Pending Invoice"], t["Pending Orders"], t["Physical Inv"],
-                t["DOH"], t["Ageing"], None]
-    for c, v in enumerate(tot_vals, 1):
-        _put(ws, rt, c, v, fmt=MT if 3 <= c <= 10 else None, bold=True, bg=TOTAL_BG,
-             align=LEFT if c <= 2 else RIGHT)
-    _put(ws, rt, 13, t["PO Issued"], fmt=MT, bold=True, bg=TOTAL_BG)
-    _put(ws, rt, 14, t["PO Prod"], fmt=MT, bold=True, bg=TOTAL_BG)
-    _put(ws, rt, 15, t["PO Compliance"], fmt=PCT0, bold=True, bg=TOTAL_BG)
-
-    # ③ Zone-wise
-    r = rt + 2
-    _band_row(ws, r, 1, 8, "③ RETAIL (ZONE-WISE) & PROJECT PERFORMANCE (MT)")
-    zh = ["Zone", "Type", "BE", "Orders", "Order % vs BE", "Invoiced",
-          "Conf. Pending Invoice", "Pending Orders (Non-Conf+SFDC)"]
-    for c, h in enumerate(zh, 1):
-        _put(ws, r + 1, c, h, bold=True, bg=HEAD_BG, align=CENTER)
-    ws.row_dimensions[r + 1].height = 30
-    z0 = r + 2
-    zones = rep.zones
-    for i, d in zones.iterrows():
-        rr = z0 + i
-        strong = d["_kind"] != "row"
-        bg = TOTAL_BG if d["_kind"] == "total" else ("FFF2CC" if strong else None)
-        vals = [d["Zone"], d["Type"] or None, d["BE"], d["Orders"], d["Order %"],
-                d["Invoiced"], d["Conf Pending Invoice"], d["Pending Orders"]]
-        for c, v in enumerate(vals, 1):
-            cbg = bg
-            if c == 5 and d["_kind"] != "total":
-                cbg = band(v, ORDER_PCT_BANDS) or bg
-            _put(ws, rr, c, v, fmt=PCT0 if c == 5 else (MT if c >= 3 else None),
-                 bold=strong or c == 1, bg=cbg, align=LEFT if c <= 2 else RIGHT)
-    # merge Zone cells only across consecutive plain rows of the same zone
-    zlabels = [f"{z}|{k}" if k == "row" else f"{z}|{k}|{j}"
-               for j, (z, k) in enumerate(zip(zones["Zone"], zones["_kind"]))]
-    start = 0
-    for i in range(1, len(zlabels) + 1):
-        if i == len(zlabels) or zlabels[i] != zlabels[start]:
-            if i - start > 1:
-                ws.merge_cells(start_row=z0 + start, start_column=1,
-                               end_row=z0 + i - 1, end_column=1)
-            start = i
-
-    ws.freeze_panes = "A3"
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 1
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(out)
-    return out
-
-
-# ─── HTML mail body (Outlook-safe: tables, inline styles, bgcolor) ───────────
-_TD = "border:1px solid #BFBFBF;padding:3px 6px;font:12px Calibri,Arial,sans-serif;"
-_TH = _TD + "background:#DCE6F1;font-weight:bold;text-align:center;"
-
-
-def _td(v: str, *, bg: str | None = None, bold: bool = False, align: str = "right",
-        extra: str = "", attrs: str = "") -> str:
-    style = _TD + f"text-align:{align};" + ("font-weight:bold;" if bold else "") + extra
-    bga = f' bgcolor="#{bg}"' if bg else ""
-    if bg:
-        style += f"background:#{bg};"
-    return f'<td{bga}{attrs} style="{style}">{v}</td>'
-
-
-def _section(title: str, colspan: int) -> str:
-    return (f'<tr><td colspan="{colspan}" bgcolor="#{TITLE_BG}" style="{_TD}'
-            f'background:#{TITLE_BG};font-weight:bold;text-align:center;font-size:13px;">'
-            f'{html.escape(title)}</td></tr>')
-
-
-def build_html(rep: MtdReport, *, letter: bool = True) -> str:
-    """Mail body. letter=False drops greeting/sign-off (used for the PNG image)."""
-    e = html.escape
-    t = rep.plant_total
-    out: list[str] = [
-        '<!DOCTYPE html><html><head><meta charset="utf-8">'
-        f"<title>{e(rep.title)}</title></head>"
-        '<body style="margin:0;padding:12px;background:#FFFFFF;">',
-        (f'<p style="font:13px Calibri,Arial,sans-serif;margin:0 0 10px 0;">Dear All,<br><br>'
-         f"Please find below the PB MTD dashboard as on <b>{e(rep.stamp)}</b> "
-         f"(Excel attached).</p>" if letter else ""),
-        '<div id="dash" style="display:inline-block;background:#FFFFFF;padding:8px;">',
-        f'<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
-        f'<tr><td style="font:bold 16px Calibri,Arial,sans-serif;color:#{NAVY};'
-        f'padding:4px 0 8px 0;">{e(rep.title)}</td></tr></table>',
+    cards = [
+        ("Latest BE (MT)", be, "mt", split("BE")),
+        ("Expected Orders", total["Exp Orders"], "mt", split("Exp Orders")),
+        ("Orders MTD", total["Orders MTD"], "mt", split("Orders MTD")),
+        ("Invoiced MTD", total["Invoiced"], "mt", split("Invoiced")),
+        ("Invoice % of BE", (total["Invoiced"] or 0) / be if be else None, "pct",
+         split("Invoiced", pct=True)),
+        ("Pending Orders to Serve", total["Pending to Serve"], "mt", split("Pending to Serve")),
+        ("DO Released", total["DO Released"], "mt", split("DO Released")),
+        ("PO Issued (H1+H2)", total["PO Issued"], "mt", split("PO Issued")),
+        ("Production MTD", total["Production MTD"], "mt", split("Production MTD")),
+        ("Expected BTR Comp", total["Exp BTR Comp"], "mt", split("Exp BTR Comp")),
+        ("Physical Inventory", total["Physical Inv"], "mt", split("Physical Inv")),
+        ("Expected Closing Inv", total["Exp Closing"], "mt", split("Exp Closing")),
     ]
 
-    # ① KPI tiles: two rows (6 + 5) so it fits a 760px mail pane
-    out.append('<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;'
-               'margin-bottom:12px;">' + _section("① KEY METRICS — MTD SNAPSHOT", 6))
-    for chunk in (rep.kpi[:6], rep.kpi[6:]):
-        out.append("<tr>")
-        for label, value, note in chunk:
-            note_html = (f'<br><span style="font-size:10px;color:#C00000;font-weight:normal;">'
-                         f"{e(note)}</span>" if note else "")
-            out.append(
-                f'<td width="125" style="{_TD}text-align:center;vertical-align:top;'
-                f'padding:6px 4px;"><span style="font-size:10px;font-weight:bold;'
-                f'color:#404040;">{e(label)}</span><br>'
-                f'<span style="font-size:22px;font-weight:bold;color:#{KPI_GREEN};">'
-                f"{e(value) or '—'}</span>{note_html}</td>")
-        out.append(f'<td style="{_TD}"></td>' * (6 - len(chunk)) + "</tr>")
-    out.append("</table>")
-
-    # ② Plant-wise
-    heads = ["Plant", "Grade", "BE", "Orders", "Invoiced", "Conf. Pending Invoice",
-             "Pending Orders (Non-Conf+SFDC)", "Physical Inv", "DOH", "Ageing (Days)",
-             "Critical Dia", "PO Issued", "PO Prod", "PO Compliance"]
-    out.append('<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;'
-               'margin-bottom:12px;">'
-               + _section("② PLANT-WISE PERFORMANCE (MT) — BY GRADE", len(heads))
-               + "<tr>" + "".join(f'<td style="{_TH}">{e(h)}</td>' for h in heads) + "</tr>")
-    p = rep.plants
-    spans = p.groupby("Plant", sort=False).size().to_dict()
-    seen: set[str] = set()
-    for _, row in p.iterrows():
-        out.append("<tr>")
-        if row["Plant"] not in seen:
-            seen.add(row["Plant"])
-            out.append(_td(e(row["Plant"]), bold=True, align="left",
-                           attrs=f' rowspan="{spans[row["Plant"]]}"', extra="vertical-align:middle;"))
-        out.append(_td(e(row["Grade"]), align="left"))
-        for c in ("BE", "Orders", "Invoiced", "Conf Pending Invoice", "Pending Orders",
-                  "Physical Inv"):
-            out.append(_td(_fmt_mt(row[c])))
-        out.append(_td(_fmt_mt(row["DOH"]), bg=band(row["DOH"], DOH_BANDS)))
-        out.append(_td(_fmt_mt(row["Ageing"]), bg=band(row["Ageing"], AGEING_BANDS)))
-        out.append(_td(e(row["Critical Dia"]), align="left",
-                       extra="font-size:10px;color:#C00000;max-width:220px;"))
-        out.append(_td(_fmt_mt(row["PO Issued"])) + _td(_fmt_mt(row["PO Prod"]))
-                   + _td(_fmt_pct1(row["PO Compliance"])))
-        out.append("</tr>")
-    tv = ["GRAND TOTAL", "", _fmt_mt(t["BE"]), _fmt_mt(t["Orders"]), _fmt_mt(t["Invoiced"]),
-          _fmt_mt(t["Conf Pending Invoice"]), _fmt_mt(t["Pending Orders"]),
-          _fmt_mt(t["Physical Inv"]), _fmt_mt(t["DOH"]), _fmt_mt(t["Ageing"]), "",
-          _fmt_mt(t["PO Issued"]), _fmt_mt(t["PO Prod"]), _fmt_pct(t["PO Compliance"])]
-    out.append("<tr>" + "".join(_td(e(v), bg=TOTAL_BG, bold=True,
-                                    align="left" if i < 2 else "right")
-                                for i, v in enumerate(tv)) + "</tr></table>")
-
-    # ③ Zone-wise
-    zh = ["Zone", "Type", "BE", "Orders", "Order % vs BE", "Invoiced",
-          "Conf. Pending Invoice", "Pending Orders (Non-Conf+SFDC)"]
-    out.append('<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;'
-               'margin-bottom:12px;">'
-               + _section("③ RETAIL (ZONE-WISE) & PROJECT PERFORMANCE (MT)", len(zh))
-               + "<tr>" + "".join(f'<td style="{_TH}">{e(h)}</td>' for h in zh) + "</tr>")
-    z = rep.zones
-    for i, row in z.iterrows():
-        kind = row["_kind"]
-        strong = kind != "row"
-        bg = TOTAL_BG if kind == "total" else ("FFF2CC" if kind == "subtotal" else None)
-        out.append("<tr>")
-        first_of_zone = kind != "row" or i == 0 or z.at[i - 1, "Zone"] != row["Zone"] \
-            or z.at[i - 1, "_kind"] != "row"
-        if first_of_zone:
-            n = 1
-            while kind == "row" and i + n < len(z) and z.at[i + n, "Zone"] == row["Zone"] \
-                    and z.at[i + n, "_kind"] == "row":
-                n += 1
-            out.append(_td(e(row["Zone"]), bold=True, bg=bg, align="left",
-                           attrs=f' rowspan="{n}"' if n > 1 else "",
-                           extra="vertical-align:middle;"))
-        out.append(_td(e(row["Type"]), bg=bg, bold=strong, align="left"))
-        out.append(_td(_fmt_mt(row["BE"]), bg=bg, bold=strong))
-        out.append(_td(_fmt_mt(row["Orders"]), bg=bg, bold=strong))
-        pbg = band(row["Order %"], ORDER_PCT_BANDS) if kind != "total" else None
-        out.append(_td(_fmt_pct(row["Order %"]), bg=pbg or bg, bold=strong))
-        for c in ("Invoiced", "Conf Pending Invoice", "Pending Orders"):
-            out.append(_td(_fmt_mt(row[c]), bg=bg, bold=strong))
-        out.append("</tr>")
-    out.append("</table>")
-    out.append('<p style="font:10px Calibri,Arial,sans-serif;color:#7F7F7F;margin:4px 0 12px 0;">'
-               "All quantities in MT. DOH: ≤7 green · 8–20 amber · 21–30 orange · &gt;30 red. "
-               "Ageing: ≤10 green · 11–20 amber · 21–45 orange · &gt;45 red. "
-               "Order % vs BE: 90–110% green · 110–130% amber · &gt;130% red.</p></div>"
-               + ('<p style="font:13px Calibri,Arial,sans-serif;margin:0;">Regards,</p>'
-                  if letter else "")
-               + "</body></html>")
-    return "".join(out)
+    # Header line: total gap, then each grade with open orders — short (worst 2 plants) / covered
+    parts = [f"Open-order serving gap <b>{_mt(total['Net to Serve'])} MT</b>"]
+    open_g = g[g["Pending to Serve"].fillna(0) > 0]
+    for grade, r in open_g.sort_values("Net to Serve").iterrows():     # shortfalls first
+        net = r["Net to Serve"] or 0
+        if net < 0:
+            worst = p[(p["Grade"] == grade) & (p["Net to Serve"] < 0)].nsmallest(2, "Net to Serve")
+            who = ", ".join(f"{html.escape(_short_plant(n))} {_signed(v)}"
+                            for n, v in zip(worst["Plant"], worst["Net to Serve"]))
+            parts.append(f"{html.escape(grade)} short {abs(net):,.0f} MT" + (f" ({who})" if who else ""))
+        else:
+            parts.append(f"{html.escape(grade)} covered +{net:,.0f} MT")
+    return Report(as_on, meta, p, g, total, cards, " &nbsp;·&nbsp; ".join(parts), warnings)
 
 
-# ─── .eml draft ──────────────────────────────────────────────────────────────
-def build_eml(rep: MtdReport, body_html: str, xlsx: Path, out: Path, *,
-              to: str = "", cc: str = "", sender: str = "") -> Path:
-    msg = EmailMessage()
-    msg["Subject"] = f"PB MTD Dashboard — {rep.as_on.strftime('%b-%y')} (As on {rep.stamp})"
-    if sender:
-        msg["From"] = sender
-    if to:
-        msg["To"] = to
-    if cc:
-        msg["Cc"] = cc
-    msg["Date"] = formatdate(localtime=True)
-    msg["X-Unsent"] = "1"          # Outlook opens it as an editable draft
-    msg.set_content(f"PB MTD Dashboard as on {rep.stamp}. Excel attached.")
-    msg.add_alternative(body_html, subtype="html")
-    msg.add_attachment(xlsx.read_bytes(), maintype="application",
-                       subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       filename=xlsx.name)
-    out.write_bytes(bytes(msg))
-    return out
-
-
-# ─── PNG snapshot (designed image: navy header, metric cards, grade splits) ──
-GRADE_SHORT = {"FE 550": "550", "FE 550D": "550D", "ONE HELIX": "Helix"}
-PILL = {GREEN: ("E3F4E8", "1E7B3A"), AMBER: ("FDF1D6", "8A6100"),
-        ORANGE: ("FDE3D3", "B4531A"), RED: ("FBE1E1", "B42318")}
-
-_SNAP_CSS = """
+# ─── Snapshot HTML (→ PNG) ───────────────────────────────────────────────────
+_CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#E9EBEE;font-family:Inter,'Segoe UI',Arial,sans-serif;color:#1B2A3A;
  -webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
 #card{width:1400px;margin:24px;background:#fff;box-shadow:0 8px 30px rgba(10,30,60,.12)}
-.hd{background:#0E2A47;color:#fff;padding:34px 38px 30px;display:flex;
- justify-content:space-between;align-items:flex-end;border-bottom:3px solid #E07A2E}
-.eyebrow{font-size:11.5px;letter-spacing:.14em;font-weight:600;color:#B8C6D6}
-.hd h1{font-size:30px;font-weight:700;margin:8px 0 6px;letter-spacing:-.01em}
-.hd .sub{font-size:13px;color:#C9D4E0}
+.hd{background:#0E2A47;color:#fff;padding:34px 38px 28px;display:flex;
+ justify-content:space-between;align-items:flex-end;border-bottom:3px solid #E07A2E;gap:24px}
+.eyebrow{font-size:11.5px;letter-spacing:.14em;font-weight:600;color:#B8C6D6;white-space:nowrap}
+.hd h1{font-size:30px;font-weight:700;margin:8px 0 6px;letter-spacing:-.01em;white-space:nowrap}
+.hd .sub{font-size:13px;color:#C9D4E0;white-space:nowrap}
 .hero{text-align:right}.hero .big{font-size:44px;font-weight:700;line-height:1.05;margin-top:6px}
 .hero .unit{font-size:11.5px;letter-spacing:.1em;font-weight:700;color:#F0A35E;margin-top:4px}
 .hero .note{font-size:12.5px;color:#DCE4EC;margin-top:10px}.hero .note b{color:#F0A35E}
 .bd{padding:26px 38px 30px}
-.sec{display:flex;align-items:center;gap:10px;margin:22px 0 14px}
-.sec:first-child{margin-top:4px}
+.sec{display:flex;align-items:center;gap:10px;margin:24px 0 14px}.sec.first{margin-top:4px}
 .num{background:#0E2A47;color:#fff;font-size:11.5px;font-weight:700;padding:3px 7px;border-radius:3px}
-.sec h2{font-size:15px;font-weight:700;white-space:nowrap}
-.sec .rule{flex:1;height:1px;background:#DDE2E8}
+.sec h2{font-size:15px;font-weight:700;white-space:nowrap}.sec .rule{flex:1;height:1px;background:#DDE2E8}
 .grid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
 .kpi{border:1px solid #DDE2E8;border-radius:4px;padding:13px 14px 12px;background:#FBFCFD}
 .kpi .l{font-size:10.5px;letter-spacing:.09em;font-weight:600;color:#6B7A8C;text-transform:uppercase}
 .kpi .v{font-size:25px;font-weight:700;margin:12px 0 9px;color:#0E2A47}
-.kpi .s{font-size:10.5px;color:#6B7A8C;white-space:nowrap}.kpi .s b{color:#0E2A47;font-weight:600}
+.kpi .s{font-size:10.5px;color:#6B7A8C;white-space:nowrap;min-height:13px}.kpi .s b{color:#0E2A47;font-weight:600}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{background:#0E2A47;color:#fff;font-size:10.5px;letter-spacing:.06em;font-weight:600;
  text-transform:uppercase;padding:10px 8px;text-align:right;white-space:nowrap}
 th.t,td.t{text-align:left}
-td{padding:8px 8px;border-bottom:1px solid #E6EAEF;text-align:right;white-space:nowrap}
-td.p{font-weight:700;border-right:1px solid #E6EAEF;white-space:normal;width:150px}
-td.g{color:#5A6878}td.dia{font-size:10px;line-height:1.35;color:#8A2A1F;white-space:normal;width:230px;text-align:left;vertical-align:middle;border-left:1px solid #E6EAEF}
-tr.tot td{background:#0E2A47;color:#fff;font-weight:700;font-size:13px;border:0;padding:12px 8px}
-tr.tot td:first-child{border-top:2px solid #E07A2E}tr.tot td{border-top:2px solid #E07A2E}
-tr.sub td{background:#F3F6F9;font-weight:700}
-.pill{display:inline-block;min-width:34px;text-align:center;padding:2px 7px;border-radius:3px;font-weight:700}
+td{padding:9px 8px;border-bottom:1px solid #E6EAEF;text-align:right;white-space:nowrap}
+td.p{font-weight:700;border-right:1px solid #E6EAEF;white-space:normal;width:170px}
+td.g{color:#5A6878}td.gb{font-weight:700}
+td.iss{font-size:10px;line-height:1.35;color:#5A6878;white-space:normal;width:290px;text-align:left}
+tr.tot td{background:#0E2A47;color:#fff;font-weight:700;font-size:13px;border-top:2px solid #E07A2E;
+ border-bottom:0;padding:12px 8px;white-space:normal}
+.pill{display:inline-block;min-width:40px;text-align:center;padding:2px 7px;border-radius:3px;font-weight:700}
 .dash{color:#A7B1BD}
-.legend{font-size:10.5px;color:#7A8796;margin-top:12px}
 .ft{background:#0E2A47;color:#9FB0C3;font-size:10.5px;letter-spacing:.1em;padding:14px 38px;
  display:flex;justify-content:space-between;text-transform:uppercase}.ft b{color:#F0A35E;font-weight:600}
 """
 
 
-def _n(v: Any, *, pct: bool = False, dp: int = 0) -> str:
-    """Snapshot number: blank/0 -> dash, negatives in (parentheses)."""
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return '<span class="dash">–</span>'
-    if pct:
-        return f"{v * 100:.0f}%"
-    txt = f"{abs(v):,.{dp}f}"
-    return f"({txt})" if v < 0 else txt
+def _c(v: float | None) -> str:
+    t = _mt(v)
+    return '<span class="dash">–</span>' if t == "–" else t
 
 
-def _pill(v: Any, bands: list[tuple[float, str | None]], *, pct: bool = False) -> str:
-    c = band(v, bands)
-    if c is None or c not in PILL:
-        return _n(v, pct=pct)
-    bg, fg = PILL[c]
-    return f'<span class="pill" style="background:#{bg};color:#{fg}">{_n(v, pct=pct)}</span>'
+def _pill(v: float | None, which: str) -> str:
+    col = pill_colours(v, which)
+    if col is None:
+        return _c(v)
+    return f'<span class="pill" style="background:#{col[0]};color:#{col[1]}">{_mt(v)}</span>'
 
 
-def grade_summary(rep: MtdReport) -> pd.DataFrame:
-    cols = ["BE", "Orders", "Invoiced", "Conf Pending Invoice", "Pending Orders",
-            "Physical Inv", "PO Issued", "PO Prod"]
-    g = rep.plants.groupby("Grade", sort=False)[cols].sum(min_count=1)
-    order = {k: i for i, k in enumerate(["FE 550", "FE 550D", "ONE HELIX"])}
-    g = g.loc[sorted(g.index, key=lambda x: order.get(x.upper(), 99))]
-    g["Order %"] = (g["Orders"] / g["BE"]).where(g["BE"].fillna(0) > 0)
-    g["Invoice %"] = (g["Invoiced"] / g["BE"]).where(g["BE"].fillna(0) > 0)
-    g["PO Compliance"] = (g["PO Prod"] / g["PO Issued"]).where(g["PO Issued"].fillna(0) > 0)
-    return g
+def issue_text(txt: str) -> str:
+    """'FE 550 (8MM-46T, 10MM-10T)' -> 'FE 550 · 8MM (46T) · 10MM (10T)'; other text as-is."""
+    if not re.search(r"\d+\s*MM\s*-", txt):
+        return txt
+    t = re.sub(r"(\d+\s*MM)\s*-\s*(\d+\s*T?)", lambda m: f"{m[1]} [{m[2]}]", txt)
+    t = t.replace("(", " · ").replace(")", "").replace(",", " · ")
+    t = re.sub(r"\s*·\s*(·\s*)*", " · ", t).strip(" ·")
+    return t.replace("[", "(").replace("]", ")")
 
 
-def _split(g: pd.DataFrame, col: str, *, pct: bool = False) -> str:
-    parts = []
-    for grade, v in g[col].items():
-        if v is None or pd.isna(v) or (not pct and v == 0):
-            continue
-        parts.append(f"{GRADE_SHORT.get(str(grade).upper(), grade)} <b>{_n(v, pct=pct)}</b>")
-    return " · ".join(parts) or "&nbsp;"
-
-
-def build_snapshot_html(rep: MtdReport) -> str:
+def build_snapshot_html(rep: Report) -> str:
     e = html.escape
-    t, m, g = rep.plant_total, rep.meta, grade_summary(rep)
-    be = m.get("latest_be") or t["BE"]
-    day = f"{rep.as_on.day} {rep.as_on.strftime('%b %Y')}"
-    hero_note = (f"Order % of BE <b>{t['Orders'] / be * 100:.0f}%</b> · Invoice % of BE "
-                 f"<b>{t['Invoiced'] / be * 100:.0f}%</b> · PO compliance "
-                 f"<b>{t['PO Compliance'] * 100:.0f}%</b> · DOH <b>{_fmt_days(m.get('doh')) or '–'}</b>"
-                 f" · Ageing <b>{_fmt_days(m.get('ageing')) or '–'} days</b>")
-    prev = m.get("prev_month_invoiced")
-    cards = [
-        ("Latest BE (MT)", _n(be), _split(g, "BE")),
-        ("Orders MTD", _n(t["Orders"]), _split(g, "Orders")),
-        ("Invoiced MTD", _n(t["Invoiced"]),
-         _split(g, "Invoiced")),
-        ("Invoice % of BE", _n(t["Invoiced"] / be if be else None, pct=True),
-         _split(g, "Invoice %", pct=True)),
-        ("Conf. Pending Invoice", _n(t["Conf Pending Invoice"]), _split(g, "Conf Pending Invoice")),
-        ("Pending Orders", _n(t["Pending Orders"]), _split(g, "Pending Orders")),
-        ("Dispatch D-1", _n(m.get("dispatch_d1")),
-         f"Prev month MTD inv <b>{prev / 1000:.1f} KMT</b>" if prev else "&nbsp;"),
-        ("PO Issued", _n(t["PO Issued"]), _split(g, "PO Issued")),
-        ("Production MTD", _n(t["PO Prod"]), _split(g, "PO Prod")),
-        ("Balance to Produce", _n(m.get("btr")), "&nbsp;"),
-        ("Physical Inventory", _n(t["Physical Inv"]), _split(g, "Physical Inv")),
-        ("Expected Closing Inv", _n(m.get("expected_closing_inv")),
-         f"DOH <b>{_fmt_days(m.get('doh')) or '–'}</b> · Ageing "
-         f"<b>{_fmt_days(m.get('ageing')) or '–'} d</b>"),
-    ]
-    o = [f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+    t = rep.total
+    o = ['<!DOCTYPE html><html><head><meta charset="utf-8">'
+         f"<title>PB TMT Update — {e(rep.day)}</title>"
          '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">'
-         f"<style>{_SNAP_CSS}</style></head><body><div id=\"card\">",
-         f'<div class="hd"><div><div class="eyebrow">JSW ONE &nbsp;·&nbsp; PRIVATE BRANDS — TMT</div>'
-         f"<h1>PB MTD Dashboard — {e(day)}</h1>"
-         f'<div class="sub">Plant-wise & Grade-wise MTD Snapshot &nbsp;·&nbsp; All plants (MT)</div></div>'
-         f'<div class="hero"><div class="eyebrow">AS ON {e(day.upper())} &nbsp;·&nbsp; MONTH-TO-DATE</div>'
-         f'<div class="big">{_n(t["Invoiced"])}</div><div class="unit">MT INVOICED MTD</div>'
-         f'<div class="note">{hero_note}</div></div></div><div class="bd">']
+         f"<style>{_CSS}</style></head><body><div id=\"card\">",
+         '<div class="hd"><div><div class="eyebrow">JSW ONE &nbsp;·&nbsp; PRIVATE BRANDS — TMT</div>'
+         f"<h1>PB TMT Update — {e(rep.day)}</h1>"
+         '<div class="sub">Plant-wise &amp; Grade-wise MTD Snapshot &nbsp;·&nbsp; All Plants (Total Qty, MT)</div></div>'
+         f'<div class="hero"><div class="eyebrow">AS ON {e(rep.day.upper())} &nbsp;·&nbsp; MONTH-TO-DATE</div>'
+         f'<div class="big">{_mt(t["Invoiced"])}</div><div class="unit">MT INVOICED MTD</div>'
+         f'<div class="note">{rep.gap_line}</div></div></div><div class="bd">']
 
-    def sec(n: str, title: str) -> None:
-        o.append(f'<div class="sec"><span class="num">{n}</span><h2>{e(title)}</h2>'
-                 '<span class="rule"></span></div>')
+    def sec(n: str, title: str, first: bool = False) -> None:
+        o.append(f'<div class="sec{" first" if first else ""}"><span class="num">{n}</span>'
+                 f'<h2>{e(title)}</h2><span class="rule"></span></div>')
 
-    sec("01", "Key Metrics — MTD Snapshot (All Plants)")
+    sec("01", "Key Metrics — MTD Snapshot (All Plants)", first=True)
     o.append('<div class="grid">' + "".join(
-        f'<div class="kpi"><div class="l">{e(l)}</div><div class="v">{v}</div>'
-        f'<div class="s">{s}</div></div>' for l, v, s in cards) + "</div>")
+        f'<div class="kpi"><div class="l">{e(l)}</div>'
+        f'<div class="v">{_pct(v) if k == "pct" else _mt(v)}</div><div class="s">{s}</div></div>'
+        for l, v, k, s in rep.cards) + "</div>")
 
     sec("02", "Plant-wise Performance — by Grade")
-    heads = [("Plant", "t"), ("Grade", "t"), ("BE", ""), ("Orders", ""), ("Invoiced", ""),
-             ("Conf. Pending", ""), ("Pending Orders", ""), ("Physical Inv", ""),
-             ("DOH", ""), ("Ageing", ""), ("PO Issued", ""), ("PO Prod", ""),
-             ("PO Comp.", ""), ("Critical Dia", "t")]
-    o.append("<table><tr>" + "".join(f'<th class="{c}">{h}</th>' for h, c in heads) + "</tr>")
+    cols = ["BE", "Exp Orders", "Orders MTD", "Invoiced", "Pending to Serve", "Physical Inv",
+            "Exp BTR Comp"]
+    heads = ["Plant", "Grade", "BE", "Exp. Orders", "Orders MTD", "Invoiced", "Pending to Serve",
+             "Physical Inv", "Exp. BTR Comp", "Net to Serve", "Exp. Closing", "Inventory Issue"]
+    o.append("<table><tr>" + "".join(
+        f'<th class="{"t" if h in ("Plant", "Grade", "Inventory Issue") else ""}">{h}</th>'
+        for h in heads) + "</tr>")
     p = rep.plants
     spans = p.groupby("Plant", sort=False).size().to_dict()
-    # Critical Dia is per plant (merged cell in the source): join the plant's rows
-    dia = {k: "<br>".join(e(x) for x in v if x)
-           for k, v in p.groupby("Plant", sort=False)["Critical Dia"]}
     seen: set[str] = set()
     for _, r in p.iterrows():
         o.append("<tr>")
-        first = r["Plant"] not in seen
-        if first:
+        if r["Plant"] not in seen:
             seen.add(r["Plant"])
             o.append(f'<td class="p t" rowspan="{spans[r["Plant"]]}">{e(r["Plant"])}</td>')
-        comp = r["PO Compliance"] if (r["PO Issued"] or 0) > 0 else None
         o.append(f'<td class="g t">{e(r["Grade"])}</td>'
-                 + "".join(f"<td>{_n(r[c])}</td>" for c in
-                           ("BE", "Orders", "Invoiced", "Conf Pending Invoice",
-                            "Pending Orders", "Physical Inv"))
-                 + f"<td>{_pill(r['DOH'], DOH_BANDS)}</td>"
-                 + f"<td>{_pill(r['Ageing'], AGEING_BANDS)}</td>"
-                 + f"<td>{_n(r['PO Issued'])}</td><td>{_n(r['PO Prod'])}</td>"
-                 + f"<td>{_n(comp, pct=True)}</td>"
-                 + (f'<td class="dia" rowspan="{spans[r["Plant"]]}">{dia[r["Plant"]]}</td>'
-                    if first else "") + "</tr>")
+                 + "".join(f"<td>{_c(r[c])}</td>" for c in cols)
+                 + f"<td>{_pill(r['Net to Serve'], 'Net to Serve')}</td><td>{_pill(r['Exp Closing'], 'Exp Closing')}</td>"
+                 + f'<td class="iss">{e(issue_text(r["Inventory Issue"]))}</td></tr>')
     o.append('<tr class="tot"><td class="t" colspan="2">GRAND TOTAL — ALL PLANTS</td>'
-             + "".join(f"<td>{_n(t[c])}</td>" for c in
-                       ("BE", "Orders", "Invoiced", "Conf Pending Invoice",
-                        "Pending Orders", "Physical Inv"))
-             + f"<td>{_fmt_days(t['DOH']) or '–'}</td><td>{_fmt_days(t['Ageing']) or '–'}</td>"
-             + f"<td>{_n(t['PO Issued'])}</td><td>{_n(t['PO Prod'])}</td>"
-             + f"<td>{_n(t['PO Compliance'], pct=True)}</td><td></td></tr></table>")
+             + "".join(f"<td>{_mt(t[c])}</td>" for c in cols)
+             + f"<td>{_mt(t['Net to Serve'])}</td><td>{_mt(t['Exp Closing'])}</td><td></td></tr></table>")
 
     sec("03", "Grade-wise Summary — All Plants")
-    gh = ["Grade", "BE", "Orders", "Order % BE", "Invoiced", "Invoice % BE", "Conf. Pending",
-          "Pending Orders", "PO Issued", "Production MTD", "PO Comp.", "Physical Inv"]
+    gcols = ["BE", "Exp Orders", "Orders MTD", "Invoiced", "Pending to Serve", "PO Issued",
+             "Production MTD", "Exp BTR Comp", "Physical Inv"]
+    gh = ["Grade", "BE", "Exp. Orders", "Orders MTD", "Invoiced", "Pending to Serve", "PO Issued",
+          "Production MTD", "Exp. BTR Comp", "Physical Inv", "Net to Serve", "Exp. Closing"]
     o.append("<table><tr>" + "".join(
         f'<th class="{"t" if i == 0 else ""}">{h}</th>' for i, h in enumerate(gh)) + "</tr>")
-    for grade, r in g.iterrows():
-        o.append(f'<tr><td class="t" style="font-weight:700">{e(grade)}</td>'
-                 f"<td>{_n(r['BE'])}</td><td>{_n(r['Orders'])}</td>"
-                 f"<td>{_pill(r['Order %'], ORDER_PCT_BANDS, pct=True)}</td>"
-                 f"<td>{_n(r['Invoiced'])}</td><td>{_n(r['Invoice %'], pct=True)}</td>"
-                 f"<td>{_n(r['Conf Pending Invoice'])}</td><td>{_n(r['Pending Orders'])}</td>"
-                 f"<td>{_n(r['PO Issued'])}</td><td>{_n(r['PO Prod'])}</td>"
-                 f"<td>{_n(r['PO Compliance'], pct=True)}</td><td>{_n(r['Physical Inv'])}</td></tr>")
+    for grade, r in rep.grades.iterrows():
+        o.append(f'<tr><td class="t gb">{e(grade)}</td>'
+                 + "".join(f"<td>{_c(r[c])}</td>" for c in gcols)
+                 + f"<td>{_pill(r['Net to Serve'], 'Net to Serve')}</td><td>{_pill(r['Exp Closing'], 'Exp Closing')}</td></tr>")
     o.append('<tr class="tot"><td class="t">TOTAL — ALL GRADES</td>'
-             f"<td>{_n(t['BE'])}</td><td>{_n(t['Orders'])}</td>"
-             f"<td>{_n(t['Orders'] / t['BE'] if t['BE'] else None, pct=True)}</td>"
-             f"<td>{_n(t['Invoiced'])}</td>"
-             f"<td>{_n(t['Invoiced'] / t['BE'] if t['BE'] else None, pct=True)}</td>"
-             f"<td>{_n(t['Conf Pending Invoice'])}</td><td>{_n(t['Pending Orders'])}</td>"
-             f"<td>{_n(t['PO Issued'])}</td><td>{_n(t['PO Prod'])}</td>"
-             f"<td>{_n(t['PO Compliance'], pct=True)}</td><td>{_n(t['Physical Inv'])}</td></tr></table>")
+             + "".join(f"<td>{_mt(t[c])}</td>" for c in gcols)
+             + f"<td>{_mt(t['Net to Serve'])}</td><td>{_mt(t['Exp Closing'])}</td></tr></table>")
 
-    o.append('<div class="legend">All quantities in MT. DOH ≤7 green · 8–20 amber · 21–30 orange · '
-             "&gt;30 red &nbsp;|&nbsp; Ageing ≤10 green · 11–20 amber · 21–45 orange · &gt;45 red "
-             "&nbsp;|&nbsp; Order % vs BE 90–110% green · 110–130% amber · &gt;130% red</div>")
-    who = m.get("prepared_by") or ""
-    o.append(f'</div><div class="ft"><span>PB MTD Dashboard &nbsp;·&nbsp; {e(day.upper())} MTD</span>'
+    who = rep.meta.get("prepared_by") or ""
+    o.append(f'</div><div class="ft"><span>PB TMT Update &nbsp;·&nbsp; {e(rep.day.upper())} MTD</span>'
              f"<span>{'PREPARED BY <b>' + e(who.upper()) + '</b> &nbsp;·&nbsp; ' if who else ''}"
              "JSW ONE PLATFORMS LTD.</span></div></div></body></html>")
     return "".join(o)
 
 
-def render_png(body_html: str, png: Path) -> Path:
-    """Screenshot the #card block (snapshot) or #dash block (mail body) at 2x."""
+def render_png(page_html: str, png: Path) -> Path:
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         try:
@@ -813,59 +418,212 @@ def render_png(body_html: str, png: Path) -> Path:
             b = pw.chromium.launch(executable_path=str(exe))
         page = b.new_page(viewport={"width": 1460, "height": 900}, device_scale_factor=2)
         try:
-            page.set_content(body_html, wait_until="networkidle", timeout=15000)
+            page.set_content(page_html, wait_until="networkidle", timeout=15000)
         except Exception:  # offline: web font unavailable, system fallback font is used
-            page.set_content(body_html, wait_until="load")
+            page.set_content(page_html, wait_until="load")
         page.evaluate("document.fonts.ready")
-        target = page.locator("#card")
-        if not target.count():
-            target = page.locator("#dash")
-        target.screenshot(path=str(png))
+        page.locator("#card").screenshot(path=str(png))
         b.close()
     return png
 
 
+# ─── Excel (same sections, values only) ──────────────────────────────────────
+_thin = Side(style="thin", color="D0D6DE")
+_B = Border(bottom=_thin)
+_W = "FFFFFF"
+MTF = '#,##0;(#,##0);"–"'
+
+
+def _cell(ws, r: int, c: int, v: Any, *, fmt: str | None = None, bold: bool = False,
+          bg: str | None = None, color: str = "1B2A3A", size: int = 10, left: bool = False,
+          wrap: bool = False) -> None:
+    x = ws.cell(row=r, column=c)
+    x.value = None if v is None or (isinstance(v, float) and pd.isna(v)) else v
+    x.font = Font(name="Calibri", size=size, bold=bold, color=color)
+    x.alignment = Alignment(horizontal="left" if left else "right", vertical="center",
+                            wrap_text=wrap)
+    x.border = _B
+    if bg:
+        x.fill = PatternFill("solid", fgColor=bg)
+    if fmt:
+        x.number_format = fmt
+
+
+def _plain(s: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", s))
+
+
+def build_xlsx(rep: Report, out: Path) -> Path:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "PB TMT Update"
+    ws.sheet_view.showGridLines = False
+    for i, w in enumerate([26, 11, 10, 11, 11, 11, 12, 11, 11, 11, 11, 60], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.merge_cells("A1:L1")
+    _cell(ws, 1, 1, f"PB TMT Update — {rep.day}   ·   Plant-wise & Grade-wise MTD Snapshot (MT)",
+          bold=True, bg=NAVY, color=_W, size=14, left=True)
+    ws.row_dimensions[1].height = 28
+    ws.merge_cells("A2:L2")
+    _cell(ws, 2, 1, f"Invoiced MTD {_mt(rep.total['Invoiced'])} MT   ·   " + _plain(rep.gap_line),
+          bg=NAVY, color="F0A35E", size=10, left=True)
+
+    r = 4
+    _cell(ws, r, 1, "01  Key Metrics — MTD Snapshot (All Plants)", bold=True, size=12, left=True)
+    for i, (label, v, kind, split) in enumerate(rep.cards):
+        row, col = r + 1 + (i // 6) * 3, 1 + (i % 6) * 2
+        for k in range(3):
+            ws.merge_cells(start_row=row + k, start_column=col, end_row=row + k, end_column=col + 1)
+        _cell(ws, row, col, label.upper(), bold=True, color="6B7A8C", size=8, left=True, bg="F4F6F8")
+        _cell(ws, row + 1, col, v, fmt="0%" if kind == "pct" else MTF, bold=True, size=16,
+              color=NAVY, left=True, bg="F4F6F8")
+        _cell(ws, row + 2, col, _plain(split) or None, color="6B7A8C", size=8, left=True, bg="F4F6F8")
+    r += 8
+
+    _cell(ws, r, 1, "02  Plant-wise Performance — by Grade", bold=True, size=12, left=True)
+    heads = ["Plant", "Grade", "BE", "Exp. Orders", "Orders MTD", "Invoiced", "Pending to Serve",
+             "Physical Inv", "Exp. BTR Comp", "Net to Serve", "Exp. Closing", "Inventory Issue"]
+    keys = ["BE", "Exp Orders", "Orders MTD", "Invoiced", "Pending to Serve", "Physical Inv",
+            "Exp BTR Comp", "Net to Serve", "Exp Closing"]
+    for c, h in enumerate(heads, 1):
+        _cell(ws, r + 1, c, h.upper(), bold=True, bg=NAVY, color=_W, size=9, left=c in (1, 2, 12))
+    r0 = r + 2
+    for i, (_, row) in enumerate(rep.plants.iterrows()):
+        rr = r0 + i
+        _cell(ws, rr, 1, row["Plant"], bold=True, left=True)
+        _cell(ws, rr, 2, row["Grade"], color="5A6878", left=True)
+        for c, k in enumerate(keys, 3):
+            col = pill_colours(row[k], k) if k in ("Net to Serve", "Exp Closing") else None
+            _cell(ws, rr, c, row[k], fmt=MTF, bold=col is not None,
+                  bg=col[0] if col else None, color=col[1] if col else "1B2A3A")
+        _cell(ws, rr, 12, issue_text(row["Inventory Issue"]) or None, color="5A6878", size=8,
+              left=True, wrap=True)
+    names = list(rep.plants["Plant"])
+    start = 0
+    for i in range(1, len(names) + 1):
+        if i == len(names) or names[i] != names[start]:
+            if i - start > 1:
+                ws.merge_cells(start_row=r0 + start, start_column=1, end_row=r0 + i - 1, end_column=1)
+            start = i
+    rt = r0 + len(names)
+    _cell(ws, rt, 1, "GRAND TOTAL — ALL PLANTS", bold=True, bg=NAVY, color=_W, left=True)
+    _cell(ws, rt, 2, None, bg=NAVY)
+    for c, k in enumerate(keys, 3):
+        _cell(ws, rt, c, rep.total[k], fmt=MTF, bold=True, bg=NAVY, color=_W)
+    _cell(ws, rt, 12, None, bg=NAVY)
+
+    r = rt + 2
+    _cell(ws, r, 1, "03  Grade-wise Summary — All Plants", bold=True, size=12, left=True)
+    gk = ["BE", "Exp Orders", "Orders MTD", "Invoiced", "Pending to Serve", "PO Issued",
+          "Production MTD", "Exp BTR Comp", "Physical Inv", "Net to Serve", "Exp Closing"]
+    gh = ["Grade", "BE", "Exp. Orders", "Orders MTD", "Invoiced", "Pending to Serve", "PO Issued",
+          "Production MTD", "Exp. BTR Comp", "Physical Inv", "Net to Serve", "Exp. Closing"]
+    for c, h in enumerate(gh, 1):
+        _cell(ws, r + 1, c, h.upper(), bold=True, bg=NAVY, color=_W, size=9, left=c == 1)
+    for i, (grade, row) in enumerate(rep.grades.iterrows()):
+        rr = r + 2 + i
+        _cell(ws, rr, 1, grade, bold=True, left=True)
+        for c, k in enumerate(gk, 2):
+            col = pill_colours(row[k], k) if k in ("Net to Serve", "Exp Closing") else None
+            _cell(ws, rr, c, row[k], fmt=MTF, bold=col is not None,
+                  bg=col[0] if col else None, color=col[1] if col else "1B2A3A")
+    rr = r + 2 + len(rep.grades)
+    _cell(ws, rr, 1, "TOTAL — ALL GRADES", bold=True, bg=NAVY, color=_W, left=True)
+    for c, k in enumerate(gk, 2):
+        _cell(ws, rr, c, rep.total[k], fmt=MTF, bold=True, bg=NAVY, color=_W)
+    who = rep.meta.get("prepared_by")
+    ws.cell(row=rr + 2, column=1).value = (f"PB TMT Update · {rep.day} MTD"
+                                           + (f"   ·   Prepared by {who}" if who else "")
+                                           + "   ·   JSW One Platforms Ltd.")
+    ws.cell(row=rr + 2, column=1).font = Font(name="Calibri", size=8, color="7A8796")
+    ws.page_setup.orientation = "landscape"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out)
+    return out
+
+
+# ─── .eml draft: PNG inline + xlsx attached ──────────────────────────────────
+def build_eml(rep: Report, xlsx: Path, png: Path | None, out: Path, *,
+              to: str = "", cc: str = "", sender: str = "") -> Path:
+    msg = EmailMessage()
+    msg["Subject"] = f"PB TMT Update — {rep.day} (MTD)"
+    if sender:
+        msg["From"] = sender
+    if to:
+        msg["To"] = to
+    if cc:
+        msg["Cc"] = cc
+    msg["Date"] = formatdate(localtime=True)
+    msg["X-Unsent"] = "1"          # Outlook opens it as an editable draft
+    msg.set_content(f"Dear All,\n\nPlease find the PB TMT update as on {rep.day} "
+                    "(Excel attached).\n\nRegards,")
+    font = "font:14px Calibri,Arial,sans-serif;"
+    cid = make_msgid(domain="pb-tmt-update")
+    img = (f'<img src="cid:{cid[1:-1]}" width="1000" alt="PB TMT Update {html.escape(rep.day)}" '
+           'style="display:block;width:1000px;max-width:100%;height:auto;border:0;">') if png else ""
+    sign = f"<br>{html.escape(rep.meta['prepared_by'])}" if rep.meta.get("prepared_by") else ""
+    msg.add_alternative(
+        f'<html><body><p style="{font}">Dear All,<br><br>Please find below the PB TMT update as on '
+        f"<b>{html.escape(rep.day)}</b> (Excel attached).</p>{img}"
+        f'<p style="{font}">Regards,{sign}</p></body></html>', subtype="html")
+    if png:
+        msg.get_payload()[1].add_related(png.read_bytes(), maintype="image", subtype="png",
+                                         cid=cid, filename=png.name)
+    msg.add_attachment(xlsx.read_bytes(), maintype="application",
+                       subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       filename=xlsx.name)
+    out.write_bytes(bytes(msg))
+    return out
+
+
 # ─── Input template ──────────────────────────────────────────────────────────
-def write_template(out: Path, *, as_on: str = "", meta: dict[str, Any] | None = None,
-                   plants: list[list[Any]] | None = None,
-                   zones: list[list[Any]] | None = None) -> Path:
+def write_template(out: Path, *, meta: dict[str, Any] | None = None,
+                   plants: list[list[Any]] | None = None) -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = "Meta"
     ws.append(["key", "value", "description"])
     meta = meta or {}
     for k, desc in META_KEYS.items():
-        ws.append([k, as_on if k == "as_on" else meta.get(k), desc])
-    for name, cols, rows in (("Plant", PLANT_COLS, plants), ("Zone", ZONE_COLS, zones)):
-        s = wb.create_sheet(name)
-        s.append(cols)
-        for r in rows or []:
-            s.append(r)
-    for s in wb.worksheets:
-        for c in s[1]:
-            c.font = Font(bold=True)
-            c.fill = _fill(HEAD_BG)
-        for i in range(1, s.max_column + 1):
-            s.column_dimensions[get_column_letter(i)].width = 16
-    wb["Meta"].column_dimensions["C"].width = 44
+        ws.append([k, meta.get(k), desc])
+    s = wb.create_sheet("Plant")
+    s.append(PLANT_COLS)
+    for r in plants or []:
+        s.append(r)
+    for sh in wb.worksheets:
+        for c in sh[1]:
+            c.font = Font(bold=True, color=_W)
+            c.fill = PatternFill("solid", fgColor=NAVY)
+        for i in range(1, sh.max_column + 1):
+            sh.column_dimensions[get_column_letter(i)].width = 15
+    wb["Meta"].column_dimensions["C"].width = 64
+    wb["Plant"].column_dimensions["A"].width = 26
+    wb["Plant"].column_dimensions["K"].width = 60
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     return out
 
 
 def build_pack(inp: Path, out_dir: Path, *, to: str = "", cc: str = "", sender: str = "",
-               png: bool = False) -> tuple[MtdReport, dict[str, Path]]:
+               png: bool = True) -> tuple[Report, dict[str, Path]]:
     rep = derive(*read_input(inp))
     out_dir.mkdir(parents=True, exist_ok=True)
+    base = f"PB_TMT_Update_{rep.stamp}"
     files: dict[str, Path] = {}
-    files["xlsx"] = build_xlsx(rep, out_dir / f"PB_MTD_Dashboard_{rep.stamp}.xlsx")
-    body = build_html(rep)
-    files["html"] = out_dir / f"PB_MTD_Mail_{rep.stamp}.html"
-    files["html"].write_text(body, encoding="utf-8")
-    files["eml"] = build_eml(rep, body, files["xlsx"], out_dir / f"PB_MTD_Mail_{rep.stamp}.eml",
-                             to=to, cc=cc, sender=sender)
+    page = build_snapshot_html(rep)
+    files["html"] = out_dir / f"{base}.html"
+    files["html"].write_text(page, encoding="utf-8")
+    files["xlsx"] = build_xlsx(rep, out_dir / f"{base}.xlsx")
     if png:
-        files["png"] = render_png(build_snapshot_html(rep), out_dir / f"PB_MTD_Dashboard_{rep.stamp}.png")
+        try:
+            files["png"] = render_png(page, out_dir / f"{base}.png")
+        except Exception as exc:  # no browser available: still produce the rest
+            rep.warnings.append(f"PNG not rendered ({exc.__class__.__name__}); mail has no image")
+    files["eml"] = build_eml(rep, files["xlsx"], files.get("png"), out_dir / f"{base}.eml",
+                             to=to, cc=cc, sender=sender)
     return rep, files
 
 
@@ -874,18 +632,18 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("template", help="write a blank input workbook")
     t.add_argument("path", type=Path)
-    b = sub.add_parser("build", help="build xlsx + html + eml from an input workbook")
+    b = sub.add_parser("build", help="build png + html + xlsx + eml from an input workbook")
     b.add_argument("input", type=Path)
     b.add_argument("--out", type=Path, default=Path(".workspace/daily_mail"))
     b.add_argument("--to", default="")
     b.add_argument("--cc", default="")
     b.add_argument("--sender", default="")
-    b.add_argument("--png", action="store_true", help="also render a PNG snapshot")
+    b.add_argument("--no-png", action="store_true", help="skip the PNG snapshot")
     a = ap.parse_args(argv)
     if a.cmd == "template":
         print(write_template(a.path))
         return 0
-    rep, files = build_pack(a.input, a.out, to=a.to, cc=a.cc, sender=a.sender, png=a.png)
+    rep, files = build_pack(a.input, a.out, to=a.to, cc=a.cc, sender=a.sender, png=not a.no_png)
     for w in rep.warnings:
         print(f"WARNING: {w}", file=sys.stderr)
     for k, pth in files.items():
