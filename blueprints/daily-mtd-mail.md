@@ -9,6 +9,9 @@ Outlook draft, with the same numbers attached as Excel.
   Blank one: `python scripts/pb_mtd_mail.py template PB_TMT_Update_Input.xlsx`
   - `Meta`: as_on (dd-mm-yyyy), prepared_by, latest_be (blank = Σ plant BE); fallbacks used
     only when the Plant column is blank: do_released, exp_btr_comp, exp_closing
+  - `Grade` (optional): per-grade Exp Orders / Exp BTR Comp / Exp Closing / DO Released —
+    fills cards + grade summary when only grade-level figures exist (e.g. BTR note
+    "FE550/FE550D/OH: 5,360/3,814/500")
   - `Plant` (one row per plant × grade; blank Plant = row above):
     Plant, Grade, BE, Exp Orders, Orders MTD, Invoiced, Pending to Serve, Physical Inv,
     Exp BTR Comp, Exp Closing, Inventory Issue, PO Issued, Production MTD, DO Released
@@ -46,3 +49,12 @@ Net to Serve / Exp Closing pills: < 0 red · amber below green-from · green fro
 
 ## Golden test
 `tests/unit/test_pb_mtd_mail.py` rebuilds the 25-Sep report and asserts every total.
+
+## Mapping from the "PB MTD DASHBOARD" Excel sheet
+- Pending to Serve = Conf. Pending Invoice + Pending Orders (Non-Conf+SFDC) (= Orders − Invoiced)
+- DO Released = Conf. Pending Invoice (assumption — confirm with the business)
+- Exp BTR Comp = "Balance to Produce (BTR)"; Exp Closing = "Expected Closing Inv" (totals / grade notes)
+- Inventory Issue = "Critical Dia"
+- Plant names: Amba-Sikandrabad → Ambashakti Industries; Amba Gwalior → Ambashakti Udyog – Gwalior;
+  Aditya → Aditya Industries; API → API Ispat & Powertech; SKA → SKA Ispat;
+  German Steel → German Green Steel & Power; AIC → AIC Iron Industries

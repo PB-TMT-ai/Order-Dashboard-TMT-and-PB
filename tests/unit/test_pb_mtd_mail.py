@@ -83,3 +83,15 @@ def test_pack_outputs(tmp_path: Path) -> None:
     assert "25 Sep 2026" in msg["Subject"] and msg["X-Unsent"] == "1"
     assert [p.get_filename() for p in msg.walk() if p.get_filename()] == [files["xlsx"].name]
     assert "GRAND TOTAL — ALL PLANTS" in files["html"].read_text(encoding="utf-8")
+
+
+def test_grade_sheet_fallback(tmp_path: Path) -> None:
+    rows = [["P", "FE 550", 100, N, 80, 50, N, 20, N, N, "", N, N, N],
+            ["Q", "FE 550D", 100, N, 80, 50, N, 20, N, N, "", N, N, N]]
+    meta = {"as_on": "01-10-2026", "grade_values": {"FE 550": {"Exp BTR Comp": 60},
+                                                    "FE 550D": {"Exp BTR Comp": 40}}}
+    rep = _rep(tmp_path, rows, meta)
+    assert rep.total["Exp BTR Comp"] == 100
+    assert rep.grades.loc["FE 550", "Exp BTR Comp"] == 60
+    cards = {label: s for label, _, _, s in rep.cards}
+    assert cards["Expected BTR Comp"] == "550 <b>60</b> · 550D <b>40</b>"

@@ -19,6 +19,8 @@ Usage:
 Input workbook:
   Meta  : as_on, prepared_by, latest_be, do_released, exp_btr_comp, exp_closing
           (the last three are only fallbacks when the Plant rows leave them blank)
+  Grade : optional — Grade, Exp Orders, Exp BTR Comp, Exp Closing, DO Released per grade,
+          used for cards + grade summary when the Plant column is blank
   Plant : Plant, Grade, BE, Exp Orders, Orders MTD, Invoiced, Pending to Serve,
           Physical Inv, Exp BTR Comp, Exp Closing, Inventory Issue, PO Issued,
           Production MTD, DO Released
@@ -138,6 +140,9 @@ def _parse_date(v: Any) -> date:
     return dt.date()
 
 
+GRADE_FALLBACK = ["Exp Orders", "Exp BTR Comp", "Exp Closing", "DO Released"]
+
+
 def read_input(path: Path) -> tuple[date, dict[str, Any], pd.DataFrame]:
     wb = load_workbook(path, data_only=True)
     for s in ("Meta", "Plant"):
@@ -149,6 +154,16 @@ def read_input(path: Path) -> tuple[date, dict[str, Any], pd.DataFrame]:
         raise ValueError("Meta.as_on is required")
     meta: dict[str, Any] = {k: _num(raw.get(k)) for k in META_KEYS if k not in META_TEXT}
     meta["prepared_by"] = str(raw.get("prepared_by") or "").strip()
+    # Optional 'Grade' sheet: grade-level values used when the Plant column is blank
+    meta["grade_values"] = {}
+    if "Grade" in wb.sheetnames:
+        grows = list(wb["Grade"].iter_rows(values_only=True))
+        gh = [ALIASES.get(str(c).strip(), str(c).strip()) if c is not None else "" for c in grows[0]]
+        for r in grows[1:]:
+            if not r or not r[0]:
+                continue
+            meta["grade_values"][str(r[0]).strip()] = {
+                c: _num(r[gh.index(c)]) for c in GRADE_FALLBACK if c in gh and gh.index(c) < len(r)}
 
     rows = list(wb["Plant"].iter_rows(values_only=True))
     header = [ALIASES.get(str(c).strip(), str(c).strip()) if c is not None else "" for c in rows[0]]
@@ -220,20 +235,30 @@ def derive(as_on: date, meta: dict[str, Any], plants: pd.DataFrame) -> Report:
     be = meta.get("latest_be") or total["BE"]
     if meta.get("latest_be") and total["BE"] and abs(meta["latest_be"] - total["BE"]) > 0.5:
         warnings.append(f"Meta.latest_be {meta['latest_be']:,.0f} ≠ plant BE total {total['BE']:,.0f}")
+    gv = meta.get("grade_values") or {}
+    for col in GRADE_FALLBACK:                # grade-level fallback (Grade sheet)
+        if p[col].isna().all() and any(v.get(col) is not None for v in gv.values()):
+            for grade in g.index:
+                g.loc[grade, col] = (gv.get(grade) or {}).get(col)
+            total[col] = _sum(g[col])
     for col, key in (("DO Released", "do_released"), ("Exp BTR Comp", "exp_btr_comp"),
                      ("Exp Closing", "exp_closing")):
-        if total[col] is None and meta.get(key) is not None:
-            total[col] = meta[key]            # card shows the total, no grade split
+        if meta.get(key) is not None:
+            if total[col] is None:
+                total[col] = meta[key]        # card shows the total, no grade split
+            elif abs(total[col] - meta[key]) > 1:
+                warnings.append(f"Meta.{key} {meta[key]:,.0f} ≠ rows/grades {total[col]:,.0f}; "
+                                "using rows/grades")
     for col in ("Exp Orders", "Exp BTR Comp", "Exp Closing", "DO Released", "PO Issued",
                 "Production MTD"):
-        if p[col].isna().all():
+        if p[col].isna().all() and g[col].isna().all():
             warnings.append(f"'{col}' is blank for every row"
                             + (" — card uses Meta total" if total[col] is not None else " — shown as –"))
     if not p["Inventory Issue"].any():
         warnings.append("Inventory Issue is blank for every row")
 
     def split(col: str, *, pct: bool = False) -> str:
-        if p[col].isna().all():
+        if g[col].isna().all():
             return ""
         out = []
         for grade, r in g.iterrows():
@@ -589,10 +614,17 @@ def write_template(out: Path, *, meta: dict[str, Any] | None = None,
     meta = meta or {}
     for k, desc in META_KEYS.items():
         ws.append([k, meta.get(k), desc])
+    # 'Grade' sheet (below) = optional grade-level Exp Orders / BTR / Closing / DO, used
+    # only when those Plant columns are blank
     s = wb.create_sheet("Plant")
     s.append(PLANT_COLS)
     for r in plants or []:
         s.append(r)
+    gs = wb.create_sheet("Grade")
+    gs.append(["Grade"] + GRADE_FALLBACK)
+    gv = meta.get("grade_values") or {}
+    for grade in GRADES:
+        gs.append([grade] + [(gv.get(grade) or {}).get(c) for c in GRADE_FALLBACK])
     for sh in wb.worksheets:
         for c in sh[1]:
             c.font = Font(bold=True, color=_W)
