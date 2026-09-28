@@ -69,7 +69,9 @@ META_KEYS = {
     "doh": "Days of inventory - DOH (overall)",
     "ageing": "Ageing days (overall)",
     "prev_month_invoiced": "Prev month invoiced MTD (MT)",
+    "prepared_by": "Prepared by (name shown in PNG footer, optional)",
 }
+META_TEXT = {"prepared_by"}
 # Pending check: |given - (Orders - Invoiced - Conf)| above this -> warning
 PENDING_TOL_MT = 2.0
 # Zone rows vs plant grand total: gap above this (any column) -> "Unmapped" row
@@ -99,7 +101,7 @@ def band(value: float | None, bands: list[tuple[float, str | None]]) -> str | No
 @dataclass
 class MtdReport:
     as_on: date
-    meta: dict[str, float | None]
+    meta: dict[str, Any]
     plants: pd.DataFrame           # PLANT_COLS + "PO Compliance"
     plant_total: dict[str, float]
     zones: pd.DataFrame            # ZONE_COLS + "Order %", "_kind" (row|subtotal|total)
@@ -162,7 +164,9 @@ def read_input(path: Path) -> tuple[date, dict[str, float | None], pd.DataFrame,
     if not meta_raw.get("as_on"):
         raise ValueError("Meta.as_on is required")
     as_on = _parse_date(meta_raw["as_on"])
-    meta = {k: _num(meta_raw.get(k)) for k in META_KEYS if k != "as_on"}
+    meta: dict[str, Any] = {k: _num(meta_raw.get(k)) for k in META_KEYS
+                            if k != "as_on" and k not in META_TEXT}
+    meta.update({k: str(meta_raw.get(k) or "").strip() for k in META_TEXT})
     plants = _frame(list(wb["Plant"].iter_rows(values_only=True)), PLANT_COLS, "Plant")
     zones = _frame(list(wb["Zone"].iter_rows(values_only=True)), ZONE_COLS, "Zone")
     return as_on, meta, plants, zones
@@ -593,8 +597,231 @@ def build_eml(rep: MtdReport, body_html: str, xlsx: Path, out: Path, *,
     return out
 
 
+# ─── PNG snapshot (designed image: navy header, metric cards, grade splits) ──
+GRADE_SHORT = {"FE 550": "550", "FE 550D": "550D", "ONE HELIX": "Helix"}
+PILL = {GREEN: ("E3F4E8", "1E7B3A"), AMBER: ("FDF1D6", "8A6100"),
+        ORANGE: ("FDE3D3", "B4531A"), RED: ("FBE1E1", "B42318")}
+
+_SNAP_CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#E9EBEE;font-family:Inter,'Segoe UI',Arial,sans-serif;color:#1B2A3A;
+ -webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+#card{width:1400px;margin:24px;background:#fff;box-shadow:0 8px 30px rgba(10,30,60,.12)}
+.hd{background:#0E2A47;color:#fff;padding:34px 38px 30px;display:flex;
+ justify-content:space-between;align-items:flex-end;border-bottom:3px solid #E07A2E}
+.eyebrow{font-size:11.5px;letter-spacing:.14em;font-weight:600;color:#B8C6D6}
+.hd h1{font-size:30px;font-weight:700;margin:8px 0 6px;letter-spacing:-.01em}
+.hd .sub{font-size:13px;color:#C9D4E0}
+.hero{text-align:right}.hero .big{font-size:44px;font-weight:700;line-height:1.05;margin-top:6px}
+.hero .unit{font-size:11.5px;letter-spacing:.1em;font-weight:700;color:#F0A35E;margin-top:4px}
+.hero .note{font-size:12.5px;color:#DCE4EC;margin-top:10px}.hero .note b{color:#F0A35E}
+.bd{padding:26px 38px 30px}
+.sec{display:flex;align-items:center;gap:10px;margin:22px 0 14px}
+.sec:first-child{margin-top:4px}
+.num{background:#0E2A47;color:#fff;font-size:11.5px;font-weight:700;padding:3px 7px;border-radius:3px}
+.sec h2{font-size:15px;font-weight:700;white-space:nowrap}
+.sec .rule{flex:1;height:1px;background:#DDE2E8}
+.grid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+.kpi{border:1px solid #DDE2E8;border-radius:4px;padding:13px 14px 12px;background:#FBFCFD}
+.kpi .l{font-size:10.5px;letter-spacing:.09em;font-weight:600;color:#6B7A8C;text-transform:uppercase}
+.kpi .v{font-size:25px;font-weight:700;margin:12px 0 9px;color:#0E2A47}
+.kpi .s{font-size:10.5px;color:#6B7A8C;white-space:nowrap}.kpi .s b{color:#0E2A47;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{background:#0E2A47;color:#fff;font-size:10.5px;letter-spacing:.06em;font-weight:600;
+ text-transform:uppercase;padding:10px 8px;text-align:right;white-space:nowrap}
+th.t,td.t{text-align:left}
+td{padding:8px 8px;border-bottom:1px solid #E6EAEF;text-align:right;white-space:nowrap}
+td.p{font-weight:700;border-right:1px solid #E6EAEF;white-space:normal;width:150px}
+td.g{color:#5A6878}td.dia{font-size:10px;color:#5A6878;white-space:normal;max-width:220px;text-align:left}
+tr.tot td{background:#0E2A47;color:#fff;font-weight:700;font-size:13px;border:0;padding:12px 8px}
+tr.tot td:first-child{border-top:2px solid #E07A2E}tr.tot td{border-top:2px solid #E07A2E}
+tr.sub td{background:#F3F6F9;font-weight:700}
+.pill{display:inline-block;min-width:34px;text-align:center;padding:2px 7px;border-radius:3px;font-weight:700}
+.dash{color:#A7B1BD}
+.legend{font-size:10.5px;color:#7A8796;margin-top:12px}
+.ft{background:#0E2A47;color:#9FB0C3;font-size:10.5px;letter-spacing:.1em;padding:14px 38px;
+ display:flex;justify-content:space-between;text-transform:uppercase}.ft b{color:#F0A35E;font-weight:600}
+"""
+
+
+def _n(v: Any, *, pct: bool = False, dp: int = 0) -> str:
+    """Snapshot number: blank/0 -> dash, negatives in (parentheses)."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return '<span class="dash">–</span>'
+    if pct:
+        return f"{v * 100:.0f}%"
+    txt = f"{abs(v):,.{dp}f}"
+    return f"({txt})" if v < 0 else txt
+
+
+def _pill(v: Any, bands: list[tuple[float, str | None]], *, pct: bool = False) -> str:
+    c = band(v, bands)
+    if c is None or c not in PILL:
+        return _n(v, pct=pct)
+    bg, fg = PILL[c]
+    return f'<span class="pill" style="background:#{bg};color:#{fg}">{_n(v, pct=pct)}</span>'
+
+
+def grade_summary(rep: MtdReport) -> pd.DataFrame:
+    cols = ["BE", "Orders", "Invoiced", "Conf Pending Invoice", "Pending Orders",
+            "Physical Inv", "PO Issued", "PO Prod"]
+    g = rep.plants.groupby("Grade", sort=False)[cols].sum(min_count=1)
+    order = {k: i for i, k in enumerate(["FE 550", "FE 550D", "ONE HELIX"])}
+    g = g.loc[sorted(g.index, key=lambda x: order.get(x.upper(), 99))]
+    g["Order %"] = (g["Orders"] / g["BE"]).where(g["BE"].fillna(0) > 0)
+    g["Invoice %"] = (g["Invoiced"] / g["BE"]).where(g["BE"].fillna(0) > 0)
+    g["PO Compliance"] = (g["PO Prod"] / g["PO Issued"]).where(g["PO Issued"].fillna(0) > 0)
+    return g
+
+
+def _split(g: pd.DataFrame, col: str, *, pct: bool = False) -> str:
+    parts = []
+    for grade, v in g[col].items():
+        if v is None or pd.isna(v) or (not pct and v == 0):
+            continue
+        parts.append(f"{GRADE_SHORT.get(str(grade).upper(), grade)} <b>{_n(v, pct=pct)}</b>")
+    return " · ".join(parts) or "&nbsp;"
+
+
+def build_snapshot_html(rep: MtdReport) -> str:
+    e = html.escape
+    t, m, g = rep.plant_total, rep.meta, grade_summary(rep)
+    be = m.get("latest_be") or t["BE"]
+    day = f"{rep.as_on.day} {rep.as_on.strftime('%b %Y')}"
+    hero_note = (f"Order % of BE <b>{t['Orders'] / be * 100:.0f}%</b> · Invoice % of BE "
+                 f"<b>{t['Invoiced'] / be * 100:.0f}%</b> · PO compliance "
+                 f"<b>{t['PO Compliance'] * 100:.0f}%</b> · DOH <b>{_fmt_days(m.get('doh')) or '–'}</b>"
+                 f" · Ageing <b>{_fmt_days(m.get('ageing')) or '–'} days</b>")
+    prev = m.get("prev_month_invoiced")
+    cards = [
+        ("Latest BE (MT)", _n(be), _split(g, "BE")),
+        ("Orders MTD", _n(t["Orders"]), _split(g, "Orders")),
+        ("Invoiced MTD", _n(t["Invoiced"]),
+         _split(g, "Invoiced")),
+        ("Invoice % of BE", _n(t["Invoiced"] / be if be else None, pct=True),
+         _split(g, "Invoice %", pct=True)),
+        ("Conf. Pending Invoice", _n(t["Conf Pending Invoice"]), _split(g, "Conf Pending Invoice")),
+        ("Pending Orders", _n(t["Pending Orders"]), _split(g, "Pending Orders")),
+        ("Dispatch D-1", _n(m.get("dispatch_d1")),
+         f"Prev month MTD inv <b>{prev / 1000:.1f} KMT</b>" if prev else "&nbsp;"),
+        ("PO Issued", _n(t["PO Issued"]), _split(g, "PO Issued")),
+        ("Production MTD", _n(t["PO Prod"]), _split(g, "PO Prod")),
+        ("Balance to Produce", _n(m.get("btr")), "&nbsp;"),
+        ("Physical Inventory", _n(t["Physical Inv"]), _split(g, "Physical Inv")),
+        ("Expected Closing Inv", _n(m.get("expected_closing_inv")),
+         f"DOH <b>{_fmt_days(m.get('doh')) or '–'}</b> · Ageing "
+         f"<b>{_fmt_days(m.get('ageing')) or '–'} d</b>"),
+    ]
+    o = [f'<!DOCTYPE html><html><head><meta charset="utf-8">'
+         '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">'
+         f"<style>{_SNAP_CSS}</style></head><body><div id=\"card\">",
+         f'<div class="hd"><div><div class="eyebrow">JSW ONE &nbsp;·&nbsp; PRIVATE BRANDS — TMT</div>'
+         f"<h1>PB MTD Dashboard — {e(day)}</h1>"
+         f'<div class="sub">Key metrics · Plant-wise & grade-wise · Zone-wise &nbsp;·&nbsp; All plants (MT)</div></div>'
+         f'<div class="hero"><div class="eyebrow">AS ON {e(day.upper())} &nbsp;·&nbsp; MONTH-TO-DATE</div>'
+         f'<div class="big">{_n(t["Invoiced"])}</div><div class="unit">MT INVOICED MTD</div>'
+         f'<div class="note">{hero_note}</div></div></div><div class="bd">']
+
+    def sec(n: str, title: str) -> None:
+        o.append(f'<div class="sec"><span class="num">{n}</span><h2>{e(title)}</h2>'
+                 '<span class="rule"></span></div>')
+
+    sec("01", "Key Metrics — MTD Snapshot (All Plants)")
+    o.append('<div class="grid">' + "".join(
+        f'<div class="kpi"><div class="l">{e(l)}</div><div class="v">{v}</div>'
+        f'<div class="s">{s}</div></div>' for l, v, s in cards) + "</div>")
+
+    sec("02", "Plant-wise Performance — by Grade")
+    heads = [("Plant", "t"), ("Grade", "t"), ("BE", ""), ("Orders", ""), ("Invoiced", ""),
+             ("Conf. Pending", ""), ("Pending Orders", ""), ("Physical Inv", ""),
+             ("DOH", ""), ("Ageing", ""), ("PO Issued", ""), ("PO Prod", ""),
+             ("PO Comp.", ""), ("Critical Dia", "t")]
+    o.append("<table><tr>" + "".join(f'<th class="{c}">{h}</th>' for h, c in heads) + "</tr>")
+    p = rep.plants
+    spans = p.groupby("Plant", sort=False).size().to_dict()
+    seen: set[str] = set()
+    for _, r in p.iterrows():
+        o.append("<tr>")
+        if r["Plant"] not in seen:
+            seen.add(r["Plant"])
+            o.append(f'<td class="p t" rowspan="{spans[r["Plant"]]}">{e(r["Plant"])}</td>')
+        comp = r["PO Compliance"] if (r["PO Issued"] or 0) > 0 else None
+        o.append(f'<td class="g t">{e(r["Grade"])}</td>'
+                 + "".join(f"<td>{_n(r[c])}</td>" for c in
+                           ("BE", "Orders", "Invoiced", "Conf Pending Invoice",
+                            "Pending Orders", "Physical Inv"))
+                 + f"<td>{_pill(r['DOH'], DOH_BANDS)}</td>"
+                 + f"<td>{_pill(r['Ageing'], AGEING_BANDS)}</td>"
+                 + f"<td>{_n(r['PO Issued'])}</td><td>{_n(r['PO Prod'])}</td>"
+                 + f"<td>{_n(comp, pct=True)}</td>"
+                 + f'<td class="dia">{e(r["Critical Dia"])}</td></tr>')
+    o.append('<tr class="tot"><td class="t" colspan="2">GRAND TOTAL — ALL PLANTS</td>'
+             + "".join(f"<td>{_n(t[c])}</td>" for c in
+                       ("BE", "Orders", "Invoiced", "Conf Pending Invoice",
+                        "Pending Orders", "Physical Inv"))
+             + f"<td>{_fmt_days(t['DOH']) or '–'}</td><td>{_fmt_days(t['Ageing']) or '–'}</td>"
+             + f"<td>{_n(t['PO Issued'])}</td><td>{_n(t['PO Prod'])}</td>"
+             + f"<td>{_n(t['PO Compliance'], pct=True)}</td><td></td></tr></table>")
+
+    sec("03", "Grade-wise Summary — All Plants")
+    gh = ["Grade", "BE", "Orders", "Order % BE", "Invoiced", "Invoice % BE", "Conf. Pending",
+          "Pending Orders", "PO Issued", "Production MTD", "PO Comp.", "Physical Inv"]
+    o.append("<table><tr>" + "".join(
+        f'<th class="{"t" if i == 0 else ""}">{h}</th>' for i, h in enumerate(gh)) + "</tr>")
+    for grade, r in g.iterrows():
+        o.append(f'<tr><td class="t" style="font-weight:700">{e(grade)}</td>'
+                 f"<td>{_n(r['BE'])}</td><td>{_n(r['Orders'])}</td>"
+                 f"<td>{_pill(r['Order %'], ORDER_PCT_BANDS, pct=True)}</td>"
+                 f"<td>{_n(r['Invoiced'])}</td><td>{_n(r['Invoice %'], pct=True)}</td>"
+                 f"<td>{_n(r['Conf Pending Invoice'])}</td><td>{_n(r['Pending Orders'])}</td>"
+                 f"<td>{_n(r['PO Issued'])}</td><td>{_n(r['PO Prod'])}</td>"
+                 f"<td>{_n(r['PO Compliance'], pct=True)}</td><td>{_n(r['Physical Inv'])}</td></tr>")
+    o.append('<tr class="tot"><td class="t">TOTAL — ALL GRADES</td>'
+             f"<td>{_n(t['BE'])}</td><td>{_n(t['Orders'])}</td>"
+             f"<td>{_n(t['Orders'] / t['BE'] if t['BE'] else None, pct=True)}</td>"
+             f"<td>{_n(t['Invoiced'])}</td>"
+             f"<td>{_n(t['Invoiced'] / t['BE'] if t['BE'] else None, pct=True)}</td>"
+             f"<td>{_n(t['Conf Pending Invoice'])}</td><td>{_n(t['Pending Orders'])}</td>"
+             f"<td>{_n(t['PO Issued'])}</td><td>{_n(t['PO Prod'])}</td>"
+             f"<td>{_n(t['PO Compliance'], pct=True)}</td><td>{_n(t['Physical Inv'])}</td></tr></table>")
+
+    sec("04", "Retail (Zone-wise) & Project Performance")
+    zh = ["Zone", "Type", "BE", "Orders", "Order % vs BE", "Invoiced", "Conf. Pending",
+          "Pending Orders"]
+    o.append("<table><tr>" + "".join(
+        f'<th class="{"t" if i < 2 else ""}">{h}</th>' for i, h in enumerate(zh)) + "</tr>")
+    z = rep.zones
+    for i, r in z.iterrows():
+        kind = r["_kind"]
+        cls = {"total": "tot", "subtotal": "sub"}.get(kind, "")
+        o.append(f'<tr class="{cls}">')
+        first = kind != "row" or i == 0 or z.at[i - 1, "Zone"] != r["Zone"] \
+            or z.at[i - 1, "_kind"] != "row"
+        if first:
+            n = 1
+            while kind == "row" and i + n < len(z) and z.at[i + n, "Zone"] == r["Zone"] \
+                    and z.at[i + n, "_kind"] == "row":
+                n += 1
+            label = "GRAND TOTAL" if kind == "total" else r["Zone"]
+            o.append(f'<td class="p t" rowspan="{n}">{e(label)}</td>')
+        pct = (_n(r["Order %"], pct=True) if kind == "total"
+               else _pill(r["Order %"], ORDER_PCT_BANDS, pct=True))
+        o.append(f'<td class="g t">{e(r["Type"])}</td><td>{_n(r["BE"])}</td>'
+                 f"<td>{_n(r['Orders'])}</td><td>{pct}</td><td>{_n(r['Invoiced'])}</td>"
+                 f"<td>{_n(r['Conf Pending Invoice'])}</td><td>{_n(r['Pending Orders'])}</td></tr>")
+    o.append("</table>")
+    o.append('<div class="legend">All quantities in MT. DOH ≤7 green · 8–20 amber · 21–30 orange · '
+             "&gt;30 red &nbsp;|&nbsp; Ageing ≤10 green · 11–20 amber · 21–45 orange · &gt;45 red "
+             "&nbsp;|&nbsp; Order % vs BE 90–110% green · 110–130% amber · &gt;130% red</div>")
+    who = m.get("prepared_by") or ""
+    o.append(f'</div><div class="ft"><span>PB MTD Dashboard &nbsp;·&nbsp; {e(day.upper())} MTD</span>'
+             f"<span>{'PREPARED BY <b>' + e(who.upper()) + '</b> &nbsp;·&nbsp; ' if who else ''}"
+             "JSW ONE PLATFORMS LTD.</span></div></div></body></html>")
+    return "".join(o)
+
+
 def render_png(body_html: str, png: Path) -> Path:
-    """Screenshot just the dashboard block (#dash), tightly cropped, at 2x."""
+    """Screenshot the #card block (snapshot) or #dash block (mail body) at 2x."""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         try:
@@ -604,9 +831,16 @@ def render_png(body_html: str, png: Path) -> Path:
             if exe is None:
                 raise
             b = pw.chromium.launch(executable_path=str(exe))
-        page = b.new_page(viewport={"width": 1400, "height": 900}, device_scale_factor=2)
-        page.set_content(body_html)
-        page.locator("#dash").screenshot(path=str(png))
+        page = b.new_page(viewport={"width": 1460, "height": 900}, device_scale_factor=2)
+        try:
+            page.set_content(body_html, wait_until="networkidle", timeout=15000)
+        except Exception:  # offline: web font unavailable, system fallback font is used
+            page.set_content(body_html, wait_until="load")
+        page.evaluate("document.fonts.ready")
+        target = page.locator("#card")
+        if not target.count():
+            target = page.locator("#dash")
+        target.screenshot(path=str(png))
         b.close()
     return png
 
@@ -651,7 +885,7 @@ def build_pack(inp: Path, out_dir: Path, *, to: str = "", cc: str = "", sender: 
     files["eml"] = build_eml(rep, body, files["xlsx"], out_dir / f"PB_MTD_Mail_{rep.stamp}.eml",
                              to=to, cc=cc, sender=sender)
     if png:
-        files["png"] = render_png(build_html(rep, letter=False), out_dir / f"PB_MTD_Dashboard_{rep.stamp}.png")
+        files["png"] = render_png(build_snapshot_html(rep), out_dir / f"PB_MTD_Dashboard_{rep.stamp}.png")
     return rep, files
 
 
