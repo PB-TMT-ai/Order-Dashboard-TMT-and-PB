@@ -717,7 +717,7 @@ def build_snapshot_html(rep: MtdReport) -> str:
          f"<style>{_SNAP_CSS}</style></head><body><div id=\"card\">",
          f'<div class="hd"><div><div class="eyebrow">JSW ONE &nbsp;·&nbsp; PRIVATE BRANDS — TMT</div>'
          f"<h1>PB MTD Dashboard — {e(day)}</h1>"
-         f'<div class="sub">Key metrics · Plant-wise & grade-wise · Zone-wise &nbsp;·&nbsp; All plants (MT)</div></div>'
+         f'<div class="sub">Plant-wise & Grade-wise MTD Snapshot &nbsp;·&nbsp; All plants (MT)</div></div>'
          f'<div class="hero"><div class="eyebrow">AS ON {e(day.upper())} &nbsp;·&nbsp; MONTH-TO-DATE</div>'
          f'<div class="big">{_n(t["Invoiced"])}</div><div class="unit">MT INVOICED MTD</div>'
          f'<div class="note">{hero_note}</div></div></div><div class="bd">']
@@ -785,31 +785,6 @@ def build_snapshot_html(rep: MtdReport) -> str:
              f"<td>{_n(t['PO Issued'])}</td><td>{_n(t['PO Prod'])}</td>"
              f"<td>{_n(t['PO Compliance'], pct=True)}</td><td>{_n(t['Physical Inv'])}</td></tr></table>")
 
-    sec("04", "Retail (Zone-wise) & Project Performance")
-    zh = ["Zone", "Type", "BE", "Orders", "Order % vs BE", "Invoiced", "Conf. Pending",
-          "Pending Orders"]
-    o.append("<table><tr>" + "".join(
-        f'<th class="{"t" if i < 2 else ""}">{h}</th>' for i, h in enumerate(zh)) + "</tr>")
-    z = rep.zones
-    for i, r in z.iterrows():
-        kind = r["_kind"]
-        cls = {"total": "tot", "subtotal": "sub"}.get(kind, "")
-        o.append(f'<tr class="{cls}">')
-        first = kind != "row" or i == 0 or z.at[i - 1, "Zone"] != r["Zone"] \
-            or z.at[i - 1, "_kind"] != "row"
-        if first:
-            n = 1
-            while kind == "row" and i + n < len(z) and z.at[i + n, "Zone"] == r["Zone"] \
-                    and z.at[i + n, "_kind"] == "row":
-                n += 1
-            label = "GRAND TOTAL" if kind == "total" else r["Zone"]
-            o.append(f'<td class="p t" rowspan="{n}">{e(label)}</td>')
-        pct = (_n(r["Order %"], pct=True) if kind == "total"
-               else _pill(r["Order %"], ORDER_PCT_BANDS, pct=True))
-        o.append(f'<td class="g t">{e(r["Type"])}</td><td>{_n(r["BE"])}</td>'
-                 f"<td>{_n(r['Orders'])}</td><td>{pct}</td><td>{_n(r['Invoiced'])}</td>"
-                 f"<td>{_n(r['Conf Pending Invoice'])}</td><td>{_n(r['Pending Orders'])}</td></tr>")
-    o.append("</table>")
     o.append('<div class="legend">All quantities in MT. DOH ≤7 green · 8–20 amber · 21–30 orange · '
              "&gt;30 red &nbsp;|&nbsp; Ageing ≤10 green · 11–20 amber · 21–45 orange · &gt;45 red "
              "&nbsp;|&nbsp; Order % vs BE 90–110% green · 110–130% amber · &gt;130% red</div>")

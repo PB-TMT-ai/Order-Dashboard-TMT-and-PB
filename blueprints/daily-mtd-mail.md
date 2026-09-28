@@ -19,7 +19,7 @@ HTML body + formatted Excel attachment (+ optional PNG snapshot).
    → `PB_MTD_Dashboard_<dd-Mon-yyyy>.xlsx`, `PB_MTD_Mail_<dd-Mon-yyyy>.html`,
    `PB_MTD_Mail_<dd-Mon-yyyy>.eml` (unsent draft with xlsx attached), optional `.png`
    (`--png`: designed snapshot — navy header, KPI cards with grade splits, plant table,
-   grade-wise summary, zone table, footer; 2x. `Meta.prepared_by` fills the footer name).
+   grade-wise summary, footer; no zone section; 2x. `Meta.prepared_by` fills the footer name).
 
 ## Steps
 1. Update the input workbook with today's numbers (copy yesterday's, overwrite).
